@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import yaml
@@ -4277,6 +4277,47 @@ def credential_test_registry_url(row: dict, override: str | None = None) -> tupl
     return f"{registry_scheme_for_host(host)}://{host}", "auto"
 
 
+
+
+def parse_www_authenticate_challenge(value: str) -> dict:
+    if not value:
+        return {}
+    scheme, _, rest = value.partition(" ")
+    if scheme.lower() != "bearer":
+        return {"scheme": scheme.lower()}
+    result = {"scheme": "bearer"}
+    for match in re.finditer(r'(realm|service|scope)="([^"]*)"', rest):
+        result[match.group(1)] = match.group(2)
+    return result
+
+
+async def registry_bearer_token(
+    client: httpx.AsyncClient,
+    challenge: dict,
+    username: str,
+    secret: str,
+) -> tuple[str | None, dict | None, str | None]:
+    realm = str(challenge.get("realm") or "").strip()
+    if not realm:
+        return None, None, "Registry 返回 Bearer challenge 但缺少 realm"
+    params = {}
+    if challenge.get("service"):
+        params["service"] = challenge["service"]
+    if challenge.get("scope"):
+        params["scope"] = challenge["scope"]
+    response = await client.get(realm, params=params, auth=(username, secret))
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if response.status_code != 200:
+        return None, {"http_status": response.status_code, "payload": payload}, "Bearer token 获取失败"
+    token = payload.get("token") or payload.get("access_token")
+    if not token:
+        return None, {"http_status": response.status_code, "payload": payload}, "Bearer token 响应缺少 token"
+    return str(token), {"http_status": response.status_code}, None
+
+
 @app.post("/api/credentials/{credential_id}/test", dependencies=[Depends(require_write_token)])
 async def test_credential(credential_id: str, body: CredentialTestIn | None = None):
     row = credential_row(credential_id)
@@ -4284,30 +4325,41 @@ async def test_credential(credential_id: str, body: CredentialTestIn | None = No
     registry_url, url_source = credential_test_registry_url(row, body.registry_url if body else None)
     check_url = f"{registry_url}/v2/"
     detail = {"registry_host": row["registry_host"], "registry_url": registry_url, "url_source": url_source}
+    auth_mode = "basic"
+    token_detail = None
     try:
         async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
             response = await client.get(check_url, auth=(row["username"], secret))
+            challenge = parse_www_authenticate_challenge(response.headers.get("www-authenticate", ""))
+            if response.status_code == 401 and challenge.get("scheme") == "bearer":
+                token, token_detail, token_error = await registry_bearer_token(client, challenge, row["username"], secret)
+                auth_mode = "bearer"
+                if token:
+                    response = await client.get(check_url, headers={"Authorization": f"Bearer {token}"})
+                else:
+                    audit_log("test_failed", "credential", row["id"], {**detail, "reason": "token", "token_detail": token_detail})
+                    return {"ok": False, "status": "authentication_failed", "auth_mode": auth_mode, "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": token_error or "Bearer token 获取失败"}
     except httpx.ConnectError as exc:
         audit_log("test_failed", "credential", row["id"], {**detail, "reason": "network"})
-        return {"ok": False, "status": "network_error", "registry_url": registry_url, "check_url": check_url, "message": f"无法连接 Registry: {exc.__class__.__name__}"}
+        return {"ok": False, "status": "network_error", "auth_mode": auth_mode, "registry_url": registry_url, "check_url": check_url, "message": f"无法连接 Registry: {exc.__class__.__name__}"}
     except httpx.ConnectTimeout:
         audit_log("test_failed", "credential", row["id"], {**detail, "reason": "timeout"})
-        return {"ok": False, "status": "timeout", "registry_url": registry_url, "check_url": check_url, "message": "连接 Registry 超时"}
+        return {"ok": False, "status": "timeout", "auth_mode": auth_mode, "registry_url": registry_url, "check_url": check_url, "message": "连接 Registry 超时"}
     except httpx.ReadTimeout:
         audit_log("test_failed", "credential", row["id"], {**detail, "reason": "timeout"})
-        return {"ok": False, "status": "timeout", "registry_url": registry_url, "check_url": check_url, "message": "Registry 响应超时"}
+        return {"ok": False, "status": "timeout", "auth_mode": auth_mode, "registry_url": registry_url, "check_url": check_url, "message": "Registry 响应超时"}
     except httpx.HTTPError as exc:
         reason = "tls_or_protocol" if isinstance(exc, (httpx.ConnectError, httpx.ProtocolError)) else "http_error"
         audit_log("test_failed", "credential", row["id"], {**detail, "reason": reason, "error": exc.__class__.__name__})
-        return {"ok": False, "status": reason, "registry_url": registry_url, "check_url": check_url, "message": f"请求 Registry 失败: {exc.__class__.__name__}"}
+        return {"ok": False, "status": reason, "auth_mode": auth_mode, "registry_url": registry_url, "check_url": check_url, "message": f"请求 Registry 失败: {exc.__class__.__name__}"}
     if response.status_code in {200, 401, 403}:
         ok = response.status_code == 200
         status = "ok" if ok else ("authentication_failed" if response.status_code == 401 else "permission_denied")
-        message = "凭据可用" if ok else ("认证失败：用户名、token/password 或 Registry 认证方式不匹配" if response.status_code == 401 else "权限不足：凭据有效但没有访问该 Registry 的权限")
-        audit_log("test_ok" if ok else "test_failed", "credential", row["id"], {**detail, "status": status, "http_status": response.status_code})
-        return {"ok": ok, "status": status, "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": message}
+        message = "凭据可用" if ok else ("认证失败：用户名、密码/token 或 Registry 认证流程不匹配" if response.status_code == 401 else "权限不足：凭据有效但没有访问该 Registry 的权限")
+        audit_log("test_ok" if ok else "test_failed", "credential", row["id"], {**detail, "status": status, "auth_mode": auth_mode, "http_status": response.status_code, "token_detail": token_detail})
+        return {"ok": ok, "status": status, "auth_mode": auth_mode, "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": message}
     audit_log("test_failed", "credential", row["id"], {**detail, "status": "registry_error", "http_status": response.status_code})
-    return {"ok": False, "status": "registry_error", "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": f"Registry 返回非预期状态码: {response.status_code}"}
+    return {"ok": False, "status": "registry_error", "auth_mode": auth_mode, "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": f"Registry 返回非预期状态码: {response.status_code}"}
 
 
 @app.post("/api/registries", dependencies=[Depends(require_write_token)])

@@ -34,7 +34,8 @@ export function Credentials({ credentials, api, reload, notify }: any) {
     const registryUrl = (testUrls[credential.id] || '').trim();
     const result = await api('POST', `/credentials/${encodeURIComponent(credential.id)}/test`, registryUrl ? { registry_url: registryUrl } : {});
     const target = result.registry_url || result.check_url || credential.registry_host;
-    notify(`${credential.name || credential.id}: ${result.status}，${result.message || ''} ${target ? `(${target})` : ''}`.trim());
+    const mode = result.auth_mode ? ` / ${result.auth_mode}` : '';
+    notify(`${credential.name || credential.id}: ${result.status}${mode}，${result.message || ''} ${target ? `(${target})` : ''}`.trim());
   }
 
   async function save() {
