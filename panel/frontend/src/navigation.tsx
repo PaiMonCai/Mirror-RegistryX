@@ -16,7 +16,7 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
   upgrade: { title: '安装升级', subtitle: '安装、升级、回滚和版本检查清单。', icon: <>⟳</> },
   logs: { title: '日志 / 事件', subtitle: '同步日志和结构化事件。', icon: <>≡</> },
   audit: { title: '审计', subtitle: '面板和同步服务的操作记录。', icon: <>⊗</> },
-  access: { title: '访问控制', subtitle: '管理本地用户角色和可撤销 API Token。', icon: <>⊛</> },
+  access: { title: '访问控制', subtitle: '管理本地登录用户和角色。', icon: <>⊛</> },
   security: { title: '安全', subtitle: '公网暴露边界和反向代理建议。', icon: <>◈</> },
   settings: { title: '设置', subtitle: '同步间隔、并发、重试、通知和数据库配置。', icon: <>⚙</> },
 };

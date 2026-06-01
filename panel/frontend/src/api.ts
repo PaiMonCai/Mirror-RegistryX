@@ -54,12 +54,10 @@ export function formatApiError(error: unknown): string {
   return String(error);
 }
 
-export function createApiClient(getToken: () => string): ApiClient {
+export function createApiClient(): ApiClient {
   return async function api<T = any>(method: ApiMethod, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    const token = getToken().trim();
-    if (token) headers.Authorization = `Bearer ${token}`;
 
     const response = await fetch(`/api${path}`, {
       method,

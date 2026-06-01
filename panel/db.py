@@ -241,18 +241,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    token_hash TEXT NOT NULL,
-    role TEXT NOT NULL,
-    scopes TEXT NOT NULL,
-    expires_at TEXT,
-    revoked INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    last_used_at TEXT
-);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -473,19 +461,6 @@ POSTGRES_SCHEMA_STATEMENTS = [
         created_at VARCHAR(64) NOT NULL,
         expires_at VARCHAR(64) NOT NULL,
         last_seen_at VARCHAR(64) NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS api_tokens (
-        id VARCHAR(64) PRIMARY KEY,
-        name VARCHAR(120) NOT NULL,
-        token_hash VARCHAR(128) NOT NULL,
-        role VARCHAR(32) NOT NULL,
-        scopes TEXT NOT NULL,
-        expires_at VARCHAR(64),
-        revoked INTEGER NOT NULL DEFAULT 0,
-        created_at VARCHAR(64) NOT NULL,
-        last_used_at VARCHAR(64)
     )
     """,
 ]

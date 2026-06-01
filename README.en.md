@@ -41,10 +41,9 @@ Production Compose no longer depends on project-side `config/` or `data/` folder
 
 On first startup, the panel initializes default `busybox` mirror configuration in the config volume.
 
-The panel now uses account/password login by default, while `PANEL_TOKEN` remains available for scripts and automation. Set a strong admin password and a real token in `.env` before exposing the panel:
+The panel now uses account/password login by default. Set a strong admin password and a real credentials master key in `.env` before exposing the panel:
 
 ```dotenv
-PANEL_TOKEN=replace-with-a-long-random-token
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-a-strong-admin-password
 SESSION_TTL_SECONDS=604800
@@ -72,7 +71,7 @@ Use `SESSION_COOKIE_SECURE=true` behind HTTPS. Local or plain HTTP intranet test
 MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
-Browser access uses an HttpOnly session cookie. `PANEL_TOKEN` is no longer the primary frontend entry; it is kept for scripts, CI, or external automation using a Bearer token against protected APIs.
+Browser and panel API access use the HttpOnly session cookie created by login. Panel APIs no longer support Bearer credentials or revocable API tokens. Remote workers still use `WORKER_TOKEN` with `X-Worker-Token` for `/api/workers/*`.
 
 ### Production Smoke Test
 
@@ -88,13 +87,13 @@ On a new host, or when you explicitly want the script to start services, pass `-
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -StartServices
 ```
 
-The script treats `.env` as a production gate by default: `PANEL_TOKEN` cannot be the default value, `ADMIN_PASSWORD` cannot be empty or a placeholder, and `CREDENTIALS_SECRET_KEY` must be set. If `PanelUrl` uses HTTPS, `SESSION_COOKIE_SECURE` must be `true`. For local trials, use `-AllowInsecureLocal` to downgrade those security findings to warnings:
+The script treats `.env` as a production gate by default: `ADMIN_PASSWORD` cannot be empty or a placeholder, and `CREDENTIALS_SECRET_KEY` must be set. If `PanelUrl` uses HTTPS, `SESSION_COOKIE_SECURE` must be `true`. For local trials, use `-AllowInsecureLocal` to downgrade those security findings to warnings:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecureLocal
 ```
 
-The full smoke checks Docker Compose config, panel login, Bearer token automation access, Registry `/v2/`, diagnostics API, and read-only backup/restore readiness. With `-StartServices` and without `-SkipSync`, it also triggers mirror sync and verifies `library/busybox:latest` in the local Registry when the default busybox mirror is configured. If the admin account was initialized earlier with a different password, pass `-AdminUsername` and `-AdminPassword`.
+The full smoke checks Docker Compose config, account/password panel login, Registry `/v2/`, diagnostics API, and read-only backup/restore readiness. With `-StartServices` and without `-SkipSync`, it also triggers mirror sync and verifies `library/busybox:latest` in the local Registry when the default busybox mirror is configured. If the admin account was initialized earlier with a different password, pass `-AdminUsername` and `-AdminPassword`.
 
 ### Operations Summary and Release Checks
 
@@ -106,7 +105,7 @@ For troubleshooting handoff, export a diagnostic bundle from the dashboard or ca
 
 ### Install and Upgrade
 
-The Install and Upgrade page plus `/api/install-upgrade/guide` provide a read-only install and upgrade path for first install, upgrade, verification, and rollback. `/api/install-upgrade/preflight` checks the running version, `MIRROR_REGISTRY_IMAGE_TAG`, admin initialization, `PANEL_TOKEN`, `CREDENTIALS_SECRET_KEY`, volumes, disk space, and active `/api/sync-queue` tasks. New installs can also call `/api/setup/checklist` for the same setup checks.
+The Install and Upgrade page plus `/api/install-upgrade/guide` provide a read-only install and upgrade path for first install, upgrade, verification, and rollback. `/api/install-upgrade/preflight` checks the running version, `MIRROR_REGISTRY_IMAGE_TAG`, admin initialization, `CREDENTIALS_SECRET_KEY`, volumes, disk space, and active `/api/sync-queue` tasks. New installs can also call `/api/setup/checklist` for the same setup checks.
 
 On the deployment host, generate an offline JSON report when the panel is unreachable or the server is in an intranet:
 
@@ -177,10 +176,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 
 ## Lightweight Access Control
 
-- The Access Control page manages local users, roles, and API Token records. Built-in roles are `admin`, `operator`, and `viewer`.
-- `viewer` can inspect status, tasks, storage, diagnostics, and audit logs. Write APIs require `operator` or `admin`; access-control management requires `admin`.
-- API Token values use the `mrt_` prefix and are stored as hashes only. The token is shown once at creation and can be revoked with `/api/access/tokens/{id}/revoke`.
-- The legacy `PANEL_TOKEN` remains for automation compatibility, but revocable API tokens are preferred.
+- The Access Control page manages only local users and roles. Built-in roles are `admin`, `operator`, and `viewer`.
+- `admin` has full panel access after login, `operator` can run write operations, and `viewer` can inspect status, tasks, storage, diagnostics, and audit logs.
+- User management remains available at `/api/access/users` and requires a logged-in `admin` session.
+- Panel APIs no longer support Bearer credentials or revocable API tokens. Automation smoke checks should call `/api/auth/login` first and reuse the session cookie.
 
 ## Image Size Statistics
 
@@ -196,7 +195,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - Retry policy: `sync_retry_count` controls max retries; copy failures use exponential backoff, and the panel can retry failed runs or failed items.
 - Storage management: the panel shows local Registry repositories, tags, estimated usage, deletion marks, and garbage collection guidance.
 - Notifications: configure `NOTIFY_WEBHOOK_URL` or the panel webhook setting to send sync failure, recovery, and low disk space events.
-- Authentication boundary: backend APIs require account/password login by default. `PANEL_TOKEN` is retained only for automation compatibility, and the panel should still sit behind a reverse proxy with optional Basic Auth or trusted IP limits before public exposure.
+- Authentication boundary: backend APIs accept only the session cookie created by account/password login. The panel should still sit behind a reverse proxy with optional Basic Auth or trusted IP limits before public exposure.
 - Import/export: the panel can export, merge import, and replace import mirror lists for backup and restore.
 - Sync preflight: the panel can run single-image or batch read-only checks for image config, credentials, tag protection, and `latest` risk. Remote probes for upstream manifests and target Registry `/v2/` run only when explicitly enabled.
 

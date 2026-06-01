@@ -144,7 +144,6 @@ def require_compose_shape() -> None:
         "NOTIFY_DEDUPE_SECONDS: ${NOTIFY_DEDUPE_SECONDS:-1800}",
         "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
-        "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
         "ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}",
         "SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}",
@@ -193,7 +192,6 @@ def require_compose_shape() -> None:
         "NOTIFY_DEDUPE_SECONDS: ${NOTIFY_DEDUPE_SECONDS:-1800}",
         "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
-        "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
         "ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}",
         "SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}",
@@ -451,20 +449,13 @@ def require_panel_features() -> None:
         "list_access_users",
         "upsert_access_user",
         "delete_access_user",
-        "api_token_user",
-        "create_api_token",
-        "revoke_api_token",
         "get_access_users",
         "save_access_user",
-        "get_api_tokens",
-        "issue_api_token",
-        "revoke_access_token",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
 
     required_snippets = [
-        "PANEL_TOKEN",
         "LoginIn",
         "ADMIN_USERNAME",
         "ADMIN_PASSWORD",
@@ -546,12 +537,8 @@ def require_panel_features() -> None:
         "@app.post(\"/api/workers/heartbeat\"",
         "@app.post(\"/api/workers/claim\"",
         "@app.post(\"/api/workers/complete\"",
-        "api_tokens",
         "AccessUserIn",
-        "ApiTokenIn",
         "@app.get(\"/api/access/users\"",
-        "@app.post(\"/api/access/tokens\"",
-        "mrt_",
         "require_admin",
         "package_manifest",
         "protected_environment",
@@ -606,6 +593,17 @@ def require_panel_features() -> None:
     missing = [snippet for snippet in required_snippets if snippet not in route_compatible_source]
     if missing:
         fail(f"panel/app.py missing security/reliability snippets: {missing}")
+    forbidden_snippets = [
+        "PANEL_TOKEN",
+        "ApiTokenIn",
+        "api_tokens",
+        "@app.post(\"/api/access/tokens\"",
+        "mrt_",
+        "bearer_token_valid",
+    ]
+    forbidden = [snippet for snippet in forbidden_snippets if snippet in route_compatible_source]
+    if forbidden:
+        fail(f"panel backend still contains deprecated token support: {forbidden}")
     ok("panel backend has v1 security and reliability boundaries")
 
 
@@ -748,7 +746,7 @@ def require_frontend_features() -> None:
         "/auth/logout",
         "LoginScreen",
         "session-card",
-        "user-pill",
+        "session-meta",
         "formatMB",
         "breakable",
         "num",
@@ -821,10 +819,7 @@ def require_frontend_features() -> None:
         "Worker 状态",
         "Worker 接入",
         "/access/users",
-        "/access/tokens",
         "访问控制",
-        "API Token",
-        "using_default_token",
         "/ops/summary",
         "/ops/diagnostic-bundle",
         "运维摘要",
@@ -842,14 +837,15 @@ def require_frontend_features() -> None:
         fail(f"panel frontend missing snippets: {missing}")
 
     for snippet in [
-        "Authorization",
-        "Bearer",
         "Content-Type",
         "credentials: 'same-origin'",
         "ApiError",
     ]:
         if snippet not in api_source:
             fail(f"panel API client missing {snippet!r}")
+    for snippet in ["Authorization", "Bearer"]:
+        if snippet in api_source:
+            fail(f"panel API client still contains deprecated {snippet!r} support")
     for snippet in [
         '"vite"',
         '"typescript"',
@@ -862,13 +858,12 @@ def require_frontend_features() -> None:
             fail(f"panel/package.json missing {snippet!r}")
     if '<div id="root"></div>' not in static_index:
         fail("Vite build output is not present in panel/static/index.html")
-    ok("React/Vite frontend uses session login and keeps Bearer automation support in the API client")
+    ok("React/Vite frontend uses session login without panel API tokens")
 
 
 def require_tests_and_docs() -> None:
     tests = read("tests/test_panel.py") + "\n" + read("tests/test_sync.py")
     for snippet in [
-        "Authorization",
         "/api/status",
         "/api/sync",
         "/api/sync-queue",
@@ -900,8 +895,7 @@ def require_tests_and_docs() -> None:
         "test_worker_heartbeat_claim_and_complete",
         "test_sync_heartbeat_registers_local_worker",
         "/api/access/users",
-        "/api/access/tokens",
-        "test_access_users_roles_and_api_tokens",
+        "test_access_users_roles_and_rejects_api_tokens",
         "tag_written",
         "/api/schedules",
         "scheduled-policy:",
@@ -911,7 +905,7 @@ def require_tests_and_docs() -> None:
         "/api/auth/logout",
         "/api/auth/me",
         "test_unauthenticated_api_requires_login",
-        "test_bearer_token_remains_automation_compatible",
+        "test_bearer_tokens_are_rejected",
         "test_session_expiry_requires_login_again",
         "/api/mirrors/discover",
         "/api/mirrors/discover/import",
@@ -972,7 +966,6 @@ def require_tests_and_docs() -> None:
         "CREDENTIALS_SECRET_KEY",
         "计划推送",
         "镜像体积统计",
-        "PANEL_TOKEN",
         "ADMIN_USERNAME",
         "ADMIN_PASSWORD",
         "SESSION_TTL_SECONDS",
@@ -1009,7 +1002,7 @@ def require_tests_and_docs() -> None:
         "WORKER_TOKEN",
         "/api/workers",
         "轻量访问控制",
-        "/api/access/tokens",
+        "/api/access/users",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -1067,13 +1060,12 @@ def require_tests_and_docs() -> None:
         "WORKER_TOKEN",
         "/api/workers",
         "Lightweight Access Control",
-        "/api/access/tokens",
+        "/api/access/users",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
     env_example = read(".env.example")
     for snippet in [
-        "PANEL_TOKEN=",
         "ADMIN_USERNAME=",
         "ADMIN_PASSWORD=",
         "SESSION_TTL_SECONDS=604800",
@@ -1116,7 +1108,6 @@ def require_tests_and_docs() -> None:
         "[switch]$StartServices",
         "[switch]$AllowInsecureLocal",
         "[switch]$SkipSync",
-        "PANEL_TOKEN",
         "ADMIN_PASSWORD",
         "CREDENTIALS_SECRET_KEY",
         "SESSION_COOKIE_SECURE",

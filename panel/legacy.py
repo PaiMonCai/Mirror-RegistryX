@@ -48,7 +48,6 @@ from .db import connect_db, database_backend, database_path as db_database_path,
 from .auth import (
     ADMIN_PASSWORD,
     ADMIN_USERNAME,
-    PANEL_TOKEN,
     SESSION_COOKIE_NAME,
     SESSION_COOKIE_SECURE,
     SESSION_COOKIE_SAMESITE,
@@ -56,7 +55,6 @@ from .auth import (
     WORKER_TOKEN,
     admin_user_exists,
     ensure_admin_user,
-    parse_worker_list,
     require_admin,
     require_api_auth,
     require_write_token,
@@ -1816,16 +1814,6 @@ def build_observability_alerts(status: dict, windows: dict, failure_breakdown: l
                 {"deletion_marks": deletion_count},
             )
         )
-    if status.get("using_default_token"):
-        alerts.append(
-            observability_alert(
-                "default_panel_token",
-                "warning",
-                "默认访问令牌",
-                "PANEL_TOKEN 仍为默认值 change-me。",
-                "在 .env 中设置强随机 PANEL_TOKEN，并重启服务。",
-            )
-        )
     top_failure = failure_breakdown[0] if failure_breakdown else None
     if top_failure and int(top_failure.get("count") or 0) >= 3:
         alerts.append(
@@ -1936,10 +1924,6 @@ def build_ops_summary() -> dict:
         reasons.append("pending_deletion_marks")
         if health == "ok":
             health = "warn"
-    if status.get("using_default_token"):
-        reasons.append("default_panel_token")
-        if health == "ok":
-            health = "warn"
     return {
         "health": health,
         "reasons": reasons,
@@ -1966,7 +1950,6 @@ def build_ops_summary() -> dict:
         "security": {
             "auth_required": status["auth_required"],
             "admin_initialized": status["admin_initialized"],
-            "using_default_token": status["using_default_token"],
         },
     }
 
@@ -2031,7 +2014,6 @@ def build_upgrade_guide() -> dict:
         ],
         "environment_variables": [
             "MIRROR_REGISTRY_IMAGE_TAG",
-            "PANEL_TOKEN",
             "ADMIN_USERNAME",
             "ADMIN_PASSWORD",
             "CREDENTIALS_SECRET_KEY",
@@ -2052,7 +2034,7 @@ def build_upgrade_guide() -> dict:
         ],
         "compatibility": [
             "SQLite remains the default database path.",
-            "PANEL_TOKEN remains supported for automation Bearer calls.",
+            "Panel API access uses account login with a session cookie.",
             "sync continues to use skopeo and does not require host Docker socket.",
         ],
         "install_upgrade": install_upgrade,
@@ -2087,7 +2069,6 @@ def build_upgrade_runtime_summary() -> dict:
         "registry_url": settings["registry_url"],
         "admin_initialized": admin_user_exists(),
         "admin_password_configured": bool(ADMIN_PASSWORD.strip()),
-        "panel_token_configured": bool(PANEL_TOKEN.strip() and PANEL_TOKEN != "change-me"),
         "credentials_secret_configured": bool(CREDENTIALS_SECRET_KEY.strip()),
         "worker_token_configured": bool(WORKER_TOKEN.strip()),
         "active_queue": queue_count_by_status(["queued", "running", "paused", "cancel_requested"]),
@@ -2127,15 +2108,6 @@ def build_upgrade_preflight(body: InstallUpgradePreflightIn | None = None) -> di
                 "已有数据卷可继续使用旧管理员密码；新部署必须在 .env 中设置 ADMIN_PASSWORD",
             )
         )
-
-    checks.append(
-        drill_check(
-            "panel_token",
-            "warn" if PANEL_TOKEN == "change-me" else "ok",
-            "PANEL_TOKEN 仍为默认值" if PANEL_TOKEN == "change-me" else "PANEL_TOKEN 已配置且未输出内容",
-            "公网或团队使用前必须设置强随机 PANEL_TOKEN，并优先使用可撤销 API Token",
-        )
-    )
 
     credential_count = len(credential_rows())
     if CREDENTIALS_SECRET_KEY.strip():
@@ -2255,7 +2227,6 @@ def build_install_upgrade_guide(include_preflight: bool = True) -> dict:
         "required_items": [
             "docker-compose.yml",
             ".env",
-            "PANEL_TOKEN",
             "ADMIN_USERNAME",
             "ADMIN_PASSWORD",
             "CREDENTIALS_SECRET_KEY",
@@ -2276,7 +2247,7 @@ def build_install_upgrade_guide(include_preflight: bool = True) -> dict:
         "host_script": f"powershell -ExecutionPolicy Bypass -File .\\{UPGRADE_CHECK_SCRIPT_LABEL} -ExpectedTag <target-tag> -ReportPath .\\upgrade-check.json",
         "compatibility": [
             "默认仍是单机 Docker Compose，不要求外部数据库或远程 worker。",
-            "SQLite 数据路径保持 data/mirror-registry.db；旧 PANEL_TOKEN 自动化仍兼容。",
+            "SQLite 数据路径保持 data/mirror-registry.db；面板 API 使用账号登录后的 session cookie。",
             "升级和回滚命令只生成清单，不由面板自动执行 destructive 操作。",
             "离线或内网环境可只使用本地脚本和已固定的 MIRROR_REGISTRY_IMAGE_TAG。",
         ],
@@ -2380,7 +2351,6 @@ def get_status():
         "auth_required": True,
         "auth_mode": "session",
         "admin_initialized": admin_user_exists(),
-        "using_default_token": PANEL_TOKEN == "change-me",
         "session_cookie_secure": SESSION_COOKIE_SECURE,
         "session_cookie_samesite": SESSION_COOKIE_SAMESITE,
         "app_version": APP_VERSION,
@@ -4119,13 +4089,6 @@ def summarize_security_checks(checks: list[dict]) -> dict:
 def build_security_checks() -> dict:
     production_mode = os.getenv("APP_ENV", "").lower() in {"prod", "production"} or os.getenv("MIRROR_REGISTRY_ENV", "").lower() in {"prod", "production"}
     checks: list[dict] = []
-    token_weak = weak_or_placeholder(PANEL_TOKEN, {"change-me", "changeme", "test-token"})
-    checks.append(security_check_item(
-        "PANEL_TOKEN",
-        "error" if token_weak and production_mode else ("warn" if token_weak else "ok"),
-        "PANEL_TOKEN 为空、默认值或占位值" if token_weak else "PANEL_TOKEN 已配置为非默认值",
-        "生产环境必须使用强随机 token；建议迁移到可撤销 API Token。",
-    ))
     password_weak = weak_or_placeholder(ADMIN_PASSWORD, {"change-me", "changeme", "password", "admin", "admin-password"})
     checks.append(security_check_item(
         "管理员密码",
@@ -4147,15 +4110,6 @@ def build_security_checks() -> dict:
         "warn" if not SESSION_COOKIE_SECURE else "ok",
         f"Secure={SESSION_COOKIE_SECURE}, SameSite={SESSION_COOKIE_SAMESITE}",
         "HTTPS 入口应设置 SESSION_COOKIE_SECURE=true；SameSite 建议保持 lax 或 strict。",
-    ))
-    scoped_tokens = db_rows("SELECT id, name, scopes, revoked FROM api_tokens WHERE revoked = 0")
-    broad_tokens = [row["id"] for row in scoped_tokens if not parse_worker_list(row.get("scopes")) or "*" in parse_worker_list(row.get("scopes"))]
-    checks.append(security_check_item(
-        "API Token Scope",
-        "warn" if broad_tokens else "ok",
-        f"{len(broad_tokens)} 个活动 API Token 未限制 scope" if broad_tokens else "活动 API Token 均已限制 scope 或暂无 token",
-        "自动化 token 建议只授予 sync、mirrors、storage、credentials、ops 等最小 scope。",
-        {"broad_token_ids": broad_tokens[:20]},
     ))
     checks.append(security_check_item(
         "敏感导出脱敏",
@@ -4191,7 +4145,7 @@ def get_security_checks():
 @app.get("/api/security-guide")
 def get_security_guide():
     return {
-        "public_exposure_boundary": "不要把 8080 面板端口直接暴露到公网。面板登录保护后台 API，PANEL_TOKEN 仅作为脚本和自动化兼容入口。",
+        "public_exposure_boundary": "不要把 8080 面板端口直接暴露到公网。面板后台 API 只接受账号登录后的 session cookie。",
         "panel_auth": {
             "mode": "single_admin_session",
             "admin_initialized": admin_user_exists(),
@@ -4201,13 +4155,11 @@ def get_security_guide():
             "session_cookie_secure": SESSION_COOKIE_SECURE,
             "session_cookie_samesite": SESSION_COOKIE_SAMESITE,
             "session_ttl_seconds": SESSION_TTL_SECONDS,
-            "automation_token_supported": bool(PANEL_TOKEN),
         },
         "security_checks": build_security_checks(),
         "recommended": [
             "通过 Nginx、Caddy 或 Traefik 放在内网入口后面。",
             "生产环境必须设置 ADMIN_USERNAME 和 ADMIN_PASSWORD 初始化管理员。",
-            "仍然保留强随机 PANEL_TOKEN，供脚本、CI 或外部自动化调用受保护接口。",
             "反向代理层 Basic Auth、SSO 或可信 IP 限制可作为额外保护层。",
         ],
         "nginx_basic_auth": [

@@ -13,7 +13,6 @@ export REGISTRY_URL="${REGISTRY_URL:-http://registry:5000}"
 export REGISTRY_STORAGE_PATH="${REGISTRY_STORAGE_PATH:-$RUNTIME_DIR/registry}"
 export STATIC_DIR="${STATIC_DIR:-$ROOT/panel/static}"
 
-export PANEL_TOKEN="${PANEL_TOKEN:-dev-panel-token-change-me}"
 export WORKER_TOKEN="${WORKER_TOKEN:-dev-worker-token-change-me}"
 export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-password-change-me}"

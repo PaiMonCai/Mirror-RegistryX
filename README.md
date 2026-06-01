@@ -41,10 +41,9 @@ docker compose ps
 
 首次启动时，面板会在配置卷中自动初始化默认 `busybox` 镜像配置。
 
-面板默认使用账号密码登录，并保留 `PANEL_TOKEN` 作为脚本和自动化调用的兼容入口。如果要暴露管理面板，先在 `.env` 中设置强管理员密码和强随机令牌：
+面板默认使用账号密码登录。如果要暴露管理面板，先在 `.env` 中设置强管理员密码，并为仓库凭据设置强随机主密钥：
 
 ```dotenv
-PANEL_TOKEN=replace-with-a-long-random-token
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-a-strong-admin-password
 SESSION_TTL_SECONDS=604800
@@ -74,7 +73,7 @@ CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
-浏览器访问使用 HttpOnly session cookie。`PANEL_TOKEN` 不再作为主要前端入口，只用于脚本、CI 或外部自动化通过 Bearer token 调用受保护 API。新增的 API Token 支持 `sync`、`mirrors`、`credentials`、`storage`、`ops`、`admin` 等最小权限 scope；面板「安全」页和 `/api/security-checks` 会检查默认 token、弱管理员密码、Cookie Secure、凭据主密钥和宽权限 token。
+浏览器和面板 API 都使用登录后的 HttpOnly session cookie。面板 API 不再支持 Bearer 凭据或可撤销 API token；面板「安全」页和 `/api/security-checks` 会检查弱管理员密码、Cookie Secure 和凭据主密钥。远程 worker 仍通过 `WORKER_TOKEN` 和 `X-Worker-Token` 调用 `/api/workers/*`。
 
 ### 生产 smoke 验收
 
@@ -98,7 +97,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -StartServices
 scripts/prod-smoke.sh --start-services
 ```
 
-脚本默认按生产门禁处理 `.env`：`PANEL_TOKEN` 不能是默认值，`ADMIN_PASSWORD` 不能为空或占位值，`CREDENTIALS_SECRET_KEY` 必须设置；如果 `PanelUrl` 使用 HTTPS，则 `SESSION_COOKIE_SECURE` 必须为 `true`。本机试跑可用 `-AllowInsecureLocal` / `--allow-insecure-local` 把这些安全项降级为 warning：
+脚本默认按生产门禁处理 `.env`：`ADMIN_PASSWORD` 不能为空或占位值，`CREDENTIALS_SECRET_KEY` 必须设置；如果 `PanelUrl` 使用 HTTPS，则 `SESSION_COOKIE_SECURE` 必须为 `true`。本机试跑可用 `-AllowInsecureLocal` / `--allow-insecure-local` 把这些安全项降级为 warning：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecureLocal
@@ -108,7 +107,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 scripts/prod-smoke.sh --allow-insecure-local
 ```
 
-完整 smoke 会检查 Docker Compose 配置、面板登录、Bearer token 自动化入口、Registry `/v2/`、诊断 API、备份恢复只读校验；在 `-StartServices` / `--start-services` 且未传 `-SkipSync` / `--skip-sync` 时，还会触发默认镜像同步并确认本地 Registry 中出现 `library/busybox:latest`。如果管理员账号已经在旧数据卷中初始化且密码不同，可通过 `-AdminUsername` / `--admin-username` 和 `-AdminPassword` / `--admin-password` 覆盖登录凭据。
+完整 smoke 会检查 Docker Compose 配置、面板账号密码登录、Registry `/v2/`、诊断 API、备份恢复只读校验；在 `-StartServices` / `--start-services` 且未传 `-SkipSync` / `--skip-sync` 时，还会触发默认镜像同步并确认本地 Registry 中出现 `library/busybox:latest`。如果管理员账号已经在旧数据卷中初始化且密码不同，可通过 `-AdminUsername` / `--admin-username` 和 `-AdminPassword` / `--admin-password` 覆盖登录凭据。
 
 Linux/macOS 还提供轻量 E2E 链路脚本，面向已运行的测试环境。它会创建临时镜像配置、执行本地 preflight、检查队列 / 历史 / 诊断 / 可观测 API，并在结束时清理测试配置；默认不触发真实同步，避免污染 Registry：
 
@@ -128,7 +127,7 @@ scripts/e2e-smoke.sh
 
 ### 安装升级
 
-面板「安装升级」页和 `/api/install-upgrade/guide` 会把首次安装、升级、验证和回滚路径整理成只读清单；`/api/install-upgrade/preflight` 可检查当前运行版本、`MIRROR_REGISTRY_IMAGE_TAG`、管理员初始化、`PANEL_TOKEN`、`CREDENTIALS_SECRET_KEY`、数据卷、磁盘空间和 `/api/sync-queue` 活动任务。首次部署也可以调用 `/api/setup/checklist` 获取同一套初始化检查。
+面板「安装升级」页和 `/api/install-upgrade/guide` 会把首次安装、升级、验证和回滚路径整理成只读清单；`/api/install-upgrade/preflight` 可检查当前运行版本、`MIRROR_REGISTRY_IMAGE_TAG`、管理员初始化、`CREDENTIALS_SECRET_KEY`、数据卷、磁盘空间和 `/api/sync-queue` 活动任务。首次部署也可以调用 `/api/setup/checklist` 获取同一套初始化检查。
 
 在部署宿主机上可用脚本生成离线 JSON 报告，便于内网或不能访问面板时排查：
 
@@ -199,10 +198,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 
 ## 轻量访问控制
 
-- 面板「访问控制」页提供本地用户、角色和 API Token 管理；角色分为 `admin`、`operator`、`viewer`。
-- `viewer` 只能查看状态、任务、存储、诊断和审计；写操作需要 `operator` 或 `admin`，访问控制管理需要 `admin`。
-- API Token 使用 `mrt_` 前缀，只保存哈希；创建后只显示一次，可通过 `/api/access/tokens/{id}/revoke` 撤销。
-- 旧 `PANEL_TOKEN` 仍保留为自动化兼容入口，但建议迁移到可撤销 API Token。
+- 面板「访问控制」页只提供本地用户和角色管理；角色分为 `admin`、`operator`、`viewer`。
+- `admin` 登录后拥有完整面板权限，`operator` 可执行写操作，`viewer` 只能查看状态、任务、存储、诊断和审计。
+- 用户管理 API 保留为 `/api/access/users`，并要求已登录的 `admin` session。
+- 面板 API 不再支持 Bearer 凭据或可撤销 API token；自动化验收需要先通过 `/api/auth/login` 获取 session cookie。
 
 ## 镜像体积统计
 
@@ -218,7 +217,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - 重试策略：`sync_retry_count` 控制最大重试次数，失败复制使用指数退避；面板可重试失败任务或失败明细。
 - 存储管理：面板展示本地 Registry 仓库、tag、估算占用、删除标记和垃圾回收指引。
 - 通知能力：配置 `NOTIFY_WEBHOOK_URL` 或面板 webhook 后，会发送同步失败、失败恢复和磁盘空间不足事件。
-- 认证增强：后台 API 默认要求账号密码登录；`PANEL_TOKEN` 仅保留为自动化兼容入口，公网暴露前仍建议放在反向代理后，并可叠加 Basic Auth 或可信 IP 限制。
+- 认证增强：后台 API 只接受账号密码登录后的 session cookie；公网暴露前仍建议放在反向代理后，并可叠加 Basic Auth 或可信 IP 限制。
 - 导入导出：面板支持镜像列表 JSON 导出、合并导入和覆盖导入，用于备份和恢复。
 - 同步预检：面板支持单条和批量预检，默认只读检查镜像配置、凭据、tag 保护和 latest 风险；显式启用远程探测后才访问上游 manifest 和目标 Registry `/v2/`。
 

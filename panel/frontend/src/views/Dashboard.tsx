@@ -25,7 +25,7 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
   const health = ops.health || 'ok';
   const healthCopy: Record<string, { title: string; body: string }> = {
     ok: { title: '镜像流水线运行正常', body: '定时检测、拉取和推送链路未发现阻断问题，可以继续维护镜像源与发布策略。' },
-    warn: { title: '流水线需要关注', body: '存在默认令牌、删除标记或待处理队列，建议在低峰期处理，避免影响后续定时推送。' },
+    warn: { title: '流水线需要关注', body: '存在删除标记或待处理队列，建议在低峰期处理，避免影响后续定时推送。' },
     error: { title: '同步链路需要处理', body: '最近的 Docker 镜像拉取、标记或推送出现异常，优先查看失败任务和诊断结果。' },
   };
   const healthInfo = healthCopy[health] || healthCopy.ok;
@@ -35,12 +35,10 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
     latest_run_failed: '最近同步失败',
     sync_active: '同步正在运行',
     pending_deletion_marks: '存在删除标记',
-    default_panel_token: 'PANEL_TOKEN 仍为默认值',
   };
   const nextActions = [
     failures.length > 0 && { label: '查看失败任务', view: 'runs', tone: 'danger' },
     ops.storage?.deletion_marks > 0 && { label: '处理删除标记', view: 'storage', tone: 'warn' },
-    status.using_default_token && { label: '加固访问控制', view: 'access', tone: 'warn' },
     { label: '运行诊断', view: 'diagnostics', tone: 'default' },
     { label: '维护镜像配置', view: 'mirrors', tone: 'default' },
   ].filter(Boolean) as Array<{ label: string; view: any; tone: string }>;
@@ -104,7 +102,7 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
             <dt>数据库</dt><dd>{ops.config?.database_backend || status.database_backend || '-'}</dd>
             <dt>Registry</dt><dd>{ops.config?.registries ?? status.registries ?? 0}</dd>
             <dt>镜像组</dt><dd>{ops.config?.mirror_groups ?? status.mirror_groups ?? 0}</dd>
-            <dt>认证状态</dt><dd>{ops.security?.auth_required ? '已启用' : '未启用'}{ops.security?.using_default_token ? ' · 默认令牌' : ''}</dd>
+            <dt>认证状态</dt><dd>{ops.security?.auth_required ? '已启用' : '未启用'}</dd>
           </dl>
         </Panel>
         <Panel title="存储状态">

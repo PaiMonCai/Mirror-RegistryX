@@ -25,19 +25,19 @@ This project follows a lightweight release log format:
 - Backend application assembly now uses domain routers while preserving existing API paths.
 - API errors use a unified envelope: `code`, `message`, `suggestion`, `details`.
 - Observability summary includes queue health, worker heartbeat health, sync duration stats, failed mirror Top N, and webhook status.
-- Browser access uses HttpOnly session cookies; `PANEL_TOKEN` remains as an automation compatibility path.
+- Browser and panel API access use HttpOnly session cookies; the legacy Bearer automation path has been removed.
 
 ### Security
 
-- API tokens now enforce scoped write access for `sync`, `mirrors`, `credentials`, `storage`, `ops`, and `admin` areas.
+- Revocable panel API tokens have been removed; panel write access now follows logged-in user roles.
 - Session cookie `SameSite` is configurable through `SESSION_COOKIE_SAMESITE`.
-- Security checks warn or fail on weak/default token, weak admin password, missing credentials secret, insecure cookie settings, and broad API tokens.
+- Security checks warn or fail on weak admin password, missing credentials secret, and insecure cookie settings.
 - Sensitive export and diagnostic paths retain redaction for secrets, tokens, passwords, and encrypted credential data.
 
 ### Operations
 
 - SQLite schema migrations are versioned through `schema_migrations` and `panel/migrations/`.
-- Production smoke checks validate `.env`, compose configuration, panel login, Bearer automation, Registry `/v2/`, diagnostics, and backup/restore verification.
+- Production smoke checks validate `.env`, compose configuration, session login, Registry `/v2/`, diagnostics, and backup/restore verification.
 
 ## Release template
 
