@@ -12,6 +12,15 @@ class AccessUserIn(BaseModel):
     role: str = Field(default="viewer", max_length=32)
 
 
+class PasswordChangeIn(BaseModel):
+    current_password: str | None = Field(default=None, min_length=1, max_length=512)
+    new_password: str = Field(min_length=8, max_length=512)
+
+
+class PasswordResetIn(BaseModel):
+    new_password: str = Field(min_length=8, max_length=512)
+
+
 class MirrorIn(BaseModel):
     source: str = Field(min_length=1, max_length=255)
     target: str = Field(min_length=1, max_length=255)

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from .db import db_execute, db_one, db_rows
 from .errors import api_error_response
-from .schemas import AccessUserIn, LoginIn
+from .schemas import AccessUserIn, LoginIn, PasswordChangeIn, PasswordResetIn
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -119,6 +119,31 @@ def public_user(row: dict) -> dict:
 
 def list_access_users() -> list[dict]:
     return [public_user(row) for row in db_rows("SELECT username, role, created_at, updated_at FROM users ORDER BY username")]
+
+
+def change_own_password(username: str, body: PasswordChangeIn) -> None:
+    row = user_row(username)
+    if not row:
+        raise HTTPException(404, "用户不存在")
+    if not verify_password(body.current_password or "", row["password_hash"]):
+        audit_log("password_change_failed", "user", username, {"reason": "invalid_current_password"}, actor=username)
+        raise HTTPException(400, "当前密码错误")
+    now = now_iso()
+    db_execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?", (password_hash(body.new_password), now, username))
+    db_execute("DELETE FROM sessions WHERE username = ?", (username,))
+    audit_log("password_change", "user", username, {"mode": "self"}, actor=username)
+
+
+def reset_user_password(username: str, body: PasswordResetIn, actor: str = "panel") -> dict:
+    clean_username = username.strip()
+    row = user_row(clean_username)
+    if not row:
+        raise HTTPException(404, "用户不存在")
+    now = now_iso()
+    db_execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?", (password_hash(body.new_password), now, clean_username))
+    db_execute("DELETE FROM sessions WHERE username = ?", (clean_username,))
+    audit_log("password_reset", "user", clean_username, {"mode": "admin"}, actor=actor)
+    return public_user(user_row(clean_username))
 
 
 def upsert_access_user(body: AccessUserIn) -> dict:
@@ -273,6 +298,15 @@ def auth_me(request: Request):
     }
 
 
+@router.post("/auth/change-password")
+def change_password(body: PasswordChangeIn, request: Request):
+    user = getattr(request.state, "auth_user", None)
+    if not user or user.get("auth_method") != "session":
+        raise HTTPException(401, "需要登录")
+    change_own_password(user["username"], body)
+    return {"ok": True}
+
+
 @router.post("/auth/logout")
 def logout(request: Request, response: Response):
     user = getattr(request.state, "auth_user", None) or {"username": "unknown", "auth_method": "unknown"}
@@ -290,6 +324,12 @@ def get_access_users():
 @router.post("/access/users", dependencies=[Depends(require_admin)])
 def save_access_user(body: AccessUserIn):
     return {"ok": True, "user": upsert_access_user(body)}
+
+
+@router.post("/access/users/{username}/reset-password", dependencies=[Depends(require_admin)])
+def reset_access_user_password(username: str, body: PasswordResetIn, request: Request):
+    actor = getattr(request.state, "auth_user", {}).get("username", "panel")
+    return {"ok": True, "user": reset_user_password(username, body, actor=actor)}
 
 
 @router.delete("/access/users/{username}", dependencies=[Depends(require_admin)])
