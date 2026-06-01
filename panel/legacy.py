@@ -319,27 +319,42 @@ def validate_credential_scope(value: str) -> str:
     return scope
 
 
+PLAIN_SECRET_PREFIX = "plain:"
+
+
 def require_credentials_secret() -> str:
+    return CREDENTIALS_SECRET_KEY.strip()
+
+
+def credential_fernet() -> Fernet | None:
     secret = CREDENTIALS_SECRET_KEY.strip()
     if not secret:
-        raise HTTPException(400, "保存仓库凭据前必须设置 CREDENTIALS_SECRET_KEY")
-    return secret
-
-
-def credential_fernet() -> Fernet:
-    digest = hashlib.sha256(require_credentials_secret().encode("utf-8")).digest()
+        return None
+    digest = hashlib.sha256(secret.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
 def encrypt_secret(secret: str) -> str:
-    return credential_fernet().encrypt(secret.encode("utf-8")).decode("ascii")
+    fernet = credential_fernet()
+    if fernet:
+        return fernet.encrypt(secret.encode("utf-8")).decode("ascii")
+    return PLAIN_SECRET_PREFIX + base64.urlsafe_b64encode(secret.encode("utf-8")).decode("ascii")
 
 
 def decrypt_secret(encrypted_secret: str) -> str:
+    value = encrypted_secret or ""
+    if value.startswith(PLAIN_SECRET_PREFIX):
+        try:
+            return base64.urlsafe_b64decode(value.removeprefix(PLAIN_SECRET_PREFIX).encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "凭据格式损坏，请重新保存仓库凭据") from exc
+    fernet = credential_fernet()
+    if not fernet:
+        raise HTTPException(400, "旧版本加密凭据无法在当前配置下解密；请在仓库凭据页面重新保存一次")
     try:
-        return credential_fernet().decrypt(encrypted_secret.encode("ascii")).decode("utf-8")
+        return fernet.decrypt(value.encode("ascii")).decode("utf-8")
     except InvalidToken as exc:
-        raise HTTPException(400, "凭据无法解密，请检查 CREDENTIALS_SECRET_KEY") from exc
+        raise HTTPException(400, "旧凭据无法解密；请在仓库凭据页面重新保存一次") from exc
 
 
 def public_credential(row: dict) -> dict:
@@ -1225,7 +1240,7 @@ def select_preflight_credential(image: str, purpose: str, explicit_id: str = "",
         try:
             decrypt_secret(row["encrypted_secret"])
         except HTTPException as exc:
-            return None, preflight_check(f"{purpose} 凭据", "error", f"凭据 {explicit} 无法解密: {exc.detail}", "检查 CREDENTIALS_SECRET_KEY 是否与备份来源一致")
+            return None, preflight_check(f"{purpose} 凭据", "error", f"凭据 {explicit} 无法解密: {exc.detail}", "在仓库凭据页面重新输入 token/password 并保存一次")
         return row, preflight_check(f"{purpose} 凭据", "ok", f"使用显式凭据 {explicit}", details={"credential_id": explicit, "host": row["registry_host"]})
 
     row = next((item for item in rows if str(item.get("registry_host") or "").lower() == host and credential_allows(item, purpose)), None)
@@ -1234,7 +1249,7 @@ def select_preflight_credential(image: str, purpose: str, explicit_id: str = "",
     try:
         decrypt_secret(row["encrypted_secret"])
     except HTTPException as exc:
-        return None, preflight_check(f"{purpose} 凭据", "error", f"host 默认凭据 {row['id']} 无法解密: {exc.detail}", "检查 CREDENTIALS_SECRET_KEY 是否与备份来源一致")
+        return None, preflight_check(f"{purpose} 凭据", "error", f"host 默认凭据 {row['id']} 无法解密: {exc.detail}", "在仓库凭据页面重新输入 token/password 并保存一次")
     return row, preflight_check(f"{purpose} 凭据", "ok", f"匹配 host 默认凭据 {row['id']}", details={"credential_id": row["id"], "host": row["registry_host"]})
 
 
@@ -4207,7 +4222,6 @@ def list_credentials():
 
 @app.post("/api/credentials", dependencies=[Depends(require_write_token)])
 def create_credential(body: CredentialIn):
-    require_credentials_secret()
     if not body.secret:
         raise HTTPException(400, "创建凭据时必须填写 secret")
     registry_host = normalize_registry_host(body.registry_host)
@@ -4232,7 +4246,6 @@ def create_credential(body: CredentialIn):
 
 @app.put("/api/credentials/{credential_id}", dependencies=[Depends(require_write_token)])
 def update_credential(credential_id: str, body: CredentialIn):
-    require_credentials_secret()
     current = credential_row(credential_id)
     registry_host = normalize_registry_host(body.registry_host)
     scope = validate_credential_scope(body.scope)

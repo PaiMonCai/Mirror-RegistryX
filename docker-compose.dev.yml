@@ -23,13 +23,11 @@ services:
       REGISTRY_STORAGE_PATH: /data/registry
       APP_VERSION: v4
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
-      WORKER_TOKEN: ${WORKER_TOKEN:-}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-mirror_registry_session}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
-      CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
     ports:
       - "8080:8080"
     volumes:
@@ -62,10 +60,6 @@ services:
       SKOPEO_DEST_TLS_VERIFY: ${SKOPEO_DEST_TLS_VERIFY:-false}
       SYNC_TARGET_REGISTRY: registry:5000
       COMMAND_TIMEOUT_SECONDS: 900
-      CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
-      WORKER_ID: ${WORKER_ID:-local-sync}
-      WORKER_NAME: ${WORKER_NAME:-Local Sync Worker}
-      WORKER_LABELS: ${WORKER_LABELS:-local,sync}
     volumes:
       - ./config:/config:ro       # mirrors.yml（只读）
       - ./data:/data              # sync-state.json + sync.log + .trigger

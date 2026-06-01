@@ -255,10 +255,6 @@ admin_pass="${ADMIN_PASSWORD:-$(config_value ADMIN_PASSWORD)}"
 if placeholder_value "$admin_pass" change-me changeme password admin admin-password replace-with-a-strong-admin-password; then
   security_issue "ADMIN_PASSWORD is empty, weak, or a placeholder."
 fi
-secret_key="$(config_value CREDENTIALS_SECRET_KEY)"
-if placeholder_value "$secret_key" change-me changeme replace-with-a-long-random-secret; then
-  security_issue "CREDENTIALS_SECRET_KEY is empty or a placeholder."
-fi
 cookie_secure="$(config_value SESSION_COOKIE_SECURE false | tr '[:upper:]' '[:lower:]')"
 if [[ "${PANEL_URL,,}" == https://* && ! "$cookie_secure" =~ ^(1|true|yes)$ ]]; then
   security_issue "PanelUrl is HTTPS but SESSION_COOKIE_SECURE is not true."
@@ -302,24 +298,6 @@ fi
 session_status="$(api_json GET '/status')" || fail "Session status API failed."
 if [[ ${#failures[@]} -eq 0 ]]; then
   echo "Session status: total mirrors=$(printf '%s' "$session_status" | json_get total), synced=$(printf '%s' "$session_status" | json_get synced)"
-fi
-diagnostics="$(api_json POST '/diagnostics/run' '{}')" || fail "Diagnostics API failed."
-if [[ ${#failures[@]} -eq 0 ]]; then
-  diag_errors="$(printf '%s' "$diagnostics" | python3 -c 'import json, sys
-data=json.load(sys.stdin)
-print("; ".join("{}: {}".format(c.get("name"), c.get("message")) for c in data.get("checks", []) if c.get("status") == "error"))')"
-  diag_warnings="$(printf '%s' "$diagnostics" | python3 -c 'import json, sys
-data=json.load(sys.stdin)
-print("\n".join("Diagnostic warning: {}: {}".format(c.get("name"), c.get("message")) for c in data.get("checks", []) if c.get("status") == "warn"))')"
-  [[ -n "$diag_warnings" ]] && while IFS= read -r line; do warn "$line"; done <<< "$diag_warnings"
-  [[ -n "$diag_errors" ]] && fail "Diagnostic errors: $diag_errors"
-fi
-verify="$(api_json POST '/backup-restore/verify' '{"require_credentials_secret":true}')" || fail "Backup restore readiness API failed."
-if [[ ${#failures[@]} -eq 0 && "$(printf '%s' "$verify" | json_get ok)" != "true" ]]; then
-  failed_checks="$(printf '%s' "$verify" | python3 -c 'import json, sys
-data=json.load(sys.stdin)
-print(", ".join(c.get("name","unknown") for c in data.get("checks", []) if not c.get("ok")))')"
-  fail "Backup restore readiness failed: $failed_checks"
 fi
 [[ ${#failures[@]} -eq 0 ]] && ok "Panel APIs checked"
 finish_failures

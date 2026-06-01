@@ -2,23 +2,11 @@ import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
-  Download,
-  FileKey2,
-  KeyRound,
-  ListChecks,
-  Pause,
-  Play,
   RefreshCw,
-  RotateCcw,
-  Search,
-  Trash2,
-  XCircle,
 } from 'lucide-react';
-import { formatApiError } from '../api';
 import { Badge, Metric, Panel } from '../components/common';
-import { ConfirmButton } from '../components/ConfirmButton';
-import type { AnyRecord, View, Mirror, Credential } from '../types';
-import { cx, diagnosticMessage, formatMB, formatRate, hostFromImage } from '../utils';
+import type { AnyRecord } from '../types';
+import { cx } from '../utils';
 
 export function Dashboard({ status, ops, api, notify, reload, setView }: { status: AnyRecord; ops: AnyRecord; api: any; notify: (message: string) => void; reload: () => void; setView: (view: any) => void }) {
   const failures = ops.sync?.recent_failures || [];
@@ -39,24 +27,9 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
   const nextActions = [
     failures.length > 0 && { label: '查看失败任务', view: 'runs', tone: 'danger' },
     ops.storage?.deletion_marks > 0 && { label: '处理删除标记', view: 'storage', tone: 'warn' },
-    { label: '运行诊断', view: 'diagnostics', tone: 'default' },
+    { label: '查看日志', view: 'logs', tone: 'default' },
     { label: '维护镜像配置', view: 'mirrors', tone: 'default' },
   ].filter(Boolean) as Array<{ label: string; view: any; tone: string }>;
-  async function exportBundle() {
-    try {
-      const bundle = await api('GET', '/ops/diagnostic-bundle');
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `mirror-registry-diagnostic-${new Date().toISOString().slice(0, 10)}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-      notify('诊断包已导出');
-    } catch (error) {
-      notify(formatApiError(error));
-    }
-  }
   const cards = [
     ['健康', <Badge value={health} />],
     ['镜像', ops.config?.mirrors ?? status.total ?? 0],
@@ -67,7 +40,7 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
   ];
   return (
     <section className="stack">
-      <Panel title="运维摘要" action={<div className="row-actions"><button onClick={reload}><RefreshCw size={16} />刷新</button><button onClick={exportBundle}><FileKey2 size={16} />导出诊断包</button></div>}>
+      <Panel title="运行概览" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
         <div className={cx('dashboard-hero', health)}>
           <div className="dashboard-hero-main">
             <span className="hero-icon">{health === 'ok' ? <CheckCircle2 size={22} /> : <AlertTriangle size={22} />}</span>

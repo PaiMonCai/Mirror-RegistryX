@@ -2,26 +2,17 @@
 
 [中文文档](README.md)
 
-Single-node private Docker registry with a lightweight management panel and scheduled image synchronization.
+Single-node private Docker image cache with a local Registry, a management panel, and a scheduled sync worker. The project is now scoped for personal-server use: login, mirror configuration, registry credentials, sync runs, storage, and logs.
 
-## What It Runs
+## Services
 
-- `registry`: official `registry:2`, storing image layers under `data/registry`.
-- `panel`: FastAPI API plus the static web panel on port `8080`.
-- `sync`: Python worker that checks upstream image digests and mirrors changed images into the local registry with `skopeo copy`.
-
-## Project Layout
-
-- `panel/main.py`: FastAPI ASGI compatibility entrypoint delegated to `panel/app.py`.
-- `panel/app.py`: panel API, route registration, and backend orchestration.
-- `panel/schemas.py`: panel request models and field constraints.
-- `sync/sync.py`: sync worker compatibility entrypoint delegated to `sync/worker.py`.
-- `sync/worker.py`: scheduler, trigger polling, and `skopeo` sync execution.
-- `mirror_registry_core/`: shared defaults and common capabilities used by panel and sync.
+- `registry`: official `registry:2`, storing local image layers.
+- `panel`: FastAPI plus the React management panel on port `8080`.
+- `sync`: Python worker that mirrors upstream images into the local Registry with `skopeo copy`.
 
 ## Production Deployment
 
-Production servers do not build the `panel` or `sync` images locally. They pull published images from GHCR. The deployment directory only needs `docker-compose.yml` and `.env`; runtime data is stored in Docker named volumes:
+Production servers pull published images instead of building locally:
 
 ```powershell
 docker compose pull
@@ -29,19 +20,25 @@ docker compose up -d
 docker compose ps
 ```
 
-You can also run the update as one command: `docker compose pull && docker compose up -d`.
+You can also update in one command:
 
-Open `http://localhost:8080`.
+```powershell
+docker compose pull && docker compose up -d
+```
 
-Production Compose no longer depends on project-side `config/` or `data/` folders:
+Open:
 
-- `mirror-registry-config`: stores the panel-generated `mirrors.yml`.
-- `mirror-registry-data`: stores SQLite, logs, trigger files, and sync state.
-- `mirror-registry-storage`: stores Registry image layers and is mounted read-only into the panel for storage statistics.
+```text
+http://localhost:8080
+```
 
-On first startup, the panel initializes default `busybox` mirror configuration in the config volume.
+Runtime data is stored in Docker named volumes:
 
-The panel now uses account/password login by default. Set a strong admin password and a real credentials master key in `.env` before exposing the panel:
+- `mirror-registry-config`: generated `mirrors.yml`.
+- `mirror-registry-data`: SQLite, logs, trigger files, and sync state.
+- `mirror-registry-storage`: Registry image layers.
+
+## .env Example
 
 ```dotenv
 ADMIN_USERNAME=admin
@@ -49,6 +46,8 @@ ADMIN_PASSWORD=replace-with-a-strong-admin-password
 SESSION_TTL_SECONDS=604800
 SESSION_COOKIE_NAME=mirror_registry_session
 SESSION_COOKIE_SECURE=false
+SESSION_COOKIE_SAMESITE=lax
+APP_ENV=development
 MIRROR_REGISTRY_IMAGE_TAG=latest
 APP_VERSION=v4
 DATABASE_URL=sqlite:////data/mirror-registry.db
@@ -60,196 +59,111 @@ NOTIFY_WEBHOOK_URL=
 NOTIFY_DEDUPE_SECONDS=1800
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
-CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
-Use `SESSION_COOKIE_SECURE=true` behind HTTPS. Local or plain HTTP intranet tests can keep it `false`. On first startup, if no admin exists in the data volume, the panel initializes one from `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+`SESSION_COOKIE_SECURE=false` is correct for plain HTTP intranet access. Set it to `true` only when the panel is served through HTTPS. If login returns 200 but `/api/auth/me` returns 401 immediately after login, check this value first.
 
-`MIRROR_REGISTRY_IMAGE_TAG` defaults to `latest`. To pin a release, set it to a specific tag:
+On first startup, if the data volume has no administrator, the panel initializes one from `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
 
-```dotenv
-MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
-```
+## Terminal Password Reset
 
-Browser and panel API access use the HttpOnly session cookie created by login. Panel APIs no longer support Bearer credentials or revocable API tokens. Remote workers still use `WORKER_TOKEN` with `X-Worker-Token` for `/api/workers/*`.
-
-### Terminal Password Reset
-
-If an administrator is locked out of the panel, reset the login password from the deployment host. The default user is `ADMIN_USERNAME`, or `admin` when the variable is not set. The command prompts for the new password with hidden input and confirmation:
+If the administrator is locked out, run this on the deployment host:
 
 ```powershell
 docker compose exec panel python -m panel.password_reset admin
 ```
 
-If the panel container is stopped, run a one-off container:
+If the panel container is stopped:
 
 ```powershell
 docker compose run --rm --no-deps panel python -m panel.password_reset admin
 ```
 
-From a source checkout or host virtual environment, use the wrapper script:
+From a source checkout:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\reset-admin-password.py admin
 ```
 
-The reset only updates an existing user by default. Add `--create-if-missing` only for explicit recovery creation; the default role is `admin`. Use `DATABASE_URL` or `--database-url` for an external database or a temporary SQLite file. `--password` is available for non-interactive automation but is not recommended for manual terminals because plaintext can land in shell history. A successful reset invalidates all sessions for that user and writes an audit entry with `action=password_reset` and `actor=terminal`; plaintext passwords are never written to audit details.
+The command updates existing users by default. For explicit recovery creation:
 
-### Production Smoke Test
+```powershell
+docker compose run --rm --no-deps panel python -m panel.password_reset admin --create-if-missing
+```
 
-Production acceptance is centered on `scripts\prod-smoke.ps1`. By default, it performs security checks and read-only probes only; it does not pull images, start services, or restart services:
+Use `--database-url` for an external database or a temporary SQLite file. The command prompts with hidden input and confirmation, invalidates all sessions for the user, and writes an audit entry without the plaintext password.
+
+## Registry Credentials
+
+The Credentials page stores source or target Registry username plus token/password pairs. New credentials no longer require an extra master secret, which keeps single-node personal deployments simple.
+
+If credentials were saved by an older version and sync says they cannot be decrypted, open the Credentials page, edit the GHCR/Docker Hub credential, enter the token/password again, and save it once. The newly saved value will be readable by the sync worker.
+
+## Common Commands
+
+```powershell
+docker compose logs -f panel
+docker compose logs -f sync
+docker compose restart panel sync
+docker compose pull && docker compose up -d
+```
+
+Trigger sync from the panel or with:
+
+```powershell
+curl -X POST http://localhost:8080/api/sync
+```
+
+## Production Smoke
+
+The smoke script checks only the core path: environment, Compose, login, `/api/status`, Registry `/v2/`, and optional sync when service startup is explicitly requested.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1
 ```
 
-On a new host, or when you explicitly want the script to start services, pass `-StartServices`:
+Linux/macOS:
+
+```bash
+scripts/prod-smoke.sh
+```
+
+To let the script pull images and start services:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -StartServices
 ```
 
-The script treats `.env` as a production gate by default: `ADMIN_PASSWORD` cannot be empty or a placeholder, and `CREDENTIALS_SECRET_KEY` must be set. If `PanelUrl` uses HTTPS, `SESSION_COOKIE_SECURE` must be `true`. For local trials, use `-AllowInsecureLocal` to downgrade those security findings to warnings:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecureLocal
-```
-
-The full smoke checks Docker Compose config, account/password panel login, Registry `/v2/`, diagnostics API, and read-only backup/restore readiness. With `-StartServices` and without `-SkipSync`, it also triggers mirror sync and verifies `library/busybox:latest` in the local Registry when the default busybox mirror is configured. If the admin account was initialized earlier with a different password, pass `-AdminUsername` and `-AdminPassword`.
-
-### Operations Summary and Release Checks
-
-The dashboard loads `/api/ops/summary` to show health, recent sync failures, disk state, deletion marks, and the running version in one place. Common auth, TLS, network, DNS, manifest, disk, and `skopeo` errors are mapped to readable reasons and suggestions while the original task error remains available in run details.
-
-The Observability page loads `/api/observability/summary` for 24h/7d sync success rate, failure breakdown, sync trend, disk state, deletion mark backlog, and active alerts. External scripts can pull `/api/observability/metrics` for lightweight metrics JSON; alert webhooks are still sent by the sync worker and `NOTIFY_DEDUPE_SECONDS` controls the dedupe window for repeated event types.
-
-For troubleshooting handoff, export a diagnostic bundle from the dashboard or call `/api/ops/diagnostic-bundle`. The bundle includes version, config summary, diagnostics, recent runs, recent failures, and events, while redacting password, token, session cookie, authfile, Authorization, and encrypted credential fields. The upgrade guide is available at `/api/ops/upgrade-guide` and covers environment variables, volumes, backups, and compatibility checks.
-
-### Install and Upgrade
-
-The Install and Upgrade page plus `/api/install-upgrade/guide` provide a read-only install and upgrade path for first install, upgrade, verification, and rollback. `/api/install-upgrade/preflight` checks the running version, `MIRROR_REGISTRY_IMAGE_TAG`, admin initialization, `CREDENTIALS_SECRET_KEY`, volumes, disk space, and active `/api/sync-queue` tasks. New installs can also call `/api/setup/checklist` for the same setup checks.
-
-On the deployment host, generate an offline JSON report when the panel is unreachable or the server is in an intranet:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\upgrade-check.ps1 -ExpectedTag v1.0.0 -ReportPath .\upgrade-check.json
-```
-
-The recommended upgrade path is: run `scripts\upgrade-check.ps1`, create a `scripts\migration-report.ps1` report or volume backup, drain the queue, run `docker compose pull && docker compose up -d`, then verify with `scripts\prod-smoke.ps1 -AllowInsecureLocal` or your production smoke parameters. Rollback means setting `.env` `MIRROR_REGISTRY_IMAGE_TAG` back to the previous tag and rerunning `docker compose pull && docker compose up -d`; the panel and scripts only generate commands and never edit production files or delete data automatically.
-
-Before a release, run the local release checklist to block missing version numbers, image tags, version notes, README files, or smoke results:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1.0.0 -ImageTag v1.0.0 -SmokeResultPath .\smoke-result.txt
-```
-
-`ImageTag` cannot be `latest` unless `-AllowLatest` is explicit. Use `-SkipBuildChecks` only when you need a partial checklist; run the full checklist before publishing.
-
-## Frontend Engineering and Registry Credentials
-
-- The panel frontend is built with React + Vite + TypeScript, and FastAPI continues to serve the built static files.
-- After frontend edits, run `npm.cmd run build`; production image builds run a Node build stage while the runtime image stays Python-only.
-- The Credentials page stores source and target registry username + token/password pairs encrypted.
-- Credentials support host defaults and per-mirror overrides. Matching priority is mirror override > host default > no credential.
-- Production deployments must set `CREDENTIALS_SECRET_KEY` before saving credentials. Secrets are not echoed, exported in plaintext, logged, or written into audit detail.
-- The sync worker creates a temporary authfile for `skopeo inspect/copy` and removes it after the command finishes.
-- Panel login uses a single admin account and a session cookie. Login success, login failure, and logout are audited without recording passwords or session tokens.
-
-## Repository Governance and Backup Restore
-
-- The Governance page supports tag protection rules. Production environments, release tags, and explicit rules block delete marks, retention policies, and automatic overwrites.
-- Retention policies run dry-run first and list candidate repo/tags, matching reasons, and protected skips. Applying a policy creates deletion marks only; it does not delete manifests.
-- Storage management has search and detail APIs that connect tag source, digest, sync task, deletion mark, and protection state.
-- Credential tests distinguish authentication failures, network failures, unreachable registries, and missing permissions while keeping token/password values redacted.
-- The backup checklist covers `config/`, `data/registry/`, `data/mirror-registry.db`, `.env`, and `CREDENTIALS_SECRET_KEY`; restore should run read-only validation before starting sync.
-- Restore drills can run from the Governance page or `scripts\restore-drill.ps1` to produce a read-only report for the backup package shape, SQLite, Registry data directory, and credentials master key without starting sync.
-- The security guide separates the panel HTTPS entry from the Registry `/v2/` HTTPS entry, and sync does not need an exposed inbound port.
-
-## Cross-machine Migration
-
-- The panel exposes `/api/migration/plan`, `/api/migration/package-manifest`, and `/api/migration/preflight` for a read-only migration guide, package manifest, and preflight checks.
-- `scripts\migration-report.ps1` outputs a JSON report on the source or target machine for `config/`, `data/registry/`, `data/mirror-registry.db`, `.env`, `CREDENTIALS_SECRET_KEY`, Docker availability, and disk space.
-- The default migration flow does not replace target volumes automatically; drain `/api/sync-queue`, stop registry, package data, restore it on the target machine, then run the restore drill.
-- If the restored data uses a different `CREDENTIALS_SECRET_KEY`, encrypted credentials remain unreadable; stop panel/sync, restore the original key, and rerun the read-only drill.
-
-## Automated Publishing and Scheduled Push
-
-- The `Dev Images` workflow supports manual dispatch and nightly schedule. Scheduled images publish `nightly-YYYYMMDD` and `dev-<sha>` only; they never overwrite release `latest`.
-- Release images are still triggered only by `v*` tags, and `latest` continues to mean the latest release.
-- The Scheduled Push page creates business image push policies. Policies are disabled by default; cron is UTC, for example `0 18 * * *` is 02:00 Beijing time.
-- Cron supports standard 5-field expressions with `*`, `*/n`, numbers, and comma lists; each policy shows last run, next run, and latest error.
-- Scheduled push supports edit, enable/disable, manual run, and delete.
-- Manual runs, create/update operations, and sync execution results are audited. Failures appear in run history, text logs, events, and webhook notifications.
-- Scheduled push refuses `latest` unless explicitly allowed, and tag protection rules still apply.
-
-## Sync Queue
-
-- Manual sync, single-mirror sync, post-import sync, scheduled push, and retry actions all enter the persistent SQLite `sync_queue`, and the worker consumes tasks by priority.
-- The Sync Tasks page shows the queue and lets you pause, resume, cancel, or replay `queued`, `completed`, `failed`, and `canceled` tasks.
-- The API exposes `GET /api/sync-queue` plus `/api/sync-queue/{id}/pause`, `/resume`, `/cancel`, and `/replay` controls.
-- On startup, the worker recovers unfinished `running` / `cancel_requested` tasks back into retryable queue items, and legacy `.trigger` files are still converted into queue tasks.
-
-## Remote Worker
-
-- The default single-node `sync` worker still consumes the local `sync_queue` directly and writes `WORKER_ID`, `WORKER_NAME`, and `WORKER_LABELS` heartbeat records into `workers`.
-- The Worker page and `GET /api/workers` show local or remote execution nodes, latest heartbeat, labels, capabilities, and latest claimed task.
-- Remote workers use the reserved `WORKER_TOKEN` least-privilege entry with `X-Worker-Token` for `/api/workers/heartbeat`, `/api/workers/claim`, and `/api/workers/complete`.
-- `WORKER_TOKEN` does not grant admin panel access; rotate it in `.env` and restart panel if it leaks.
-
-## Lightweight Access Control
-
-- The Access Control page manages only local users and roles. Built-in roles are `admin`, `operator`, and `viewer`.
-- `admin` has full panel access after login, `operator` can run write operations, and `viewer` can inspect status, tasks, storage, diagnostics, and audit logs.
-- User management remains available at `/api/access/users` and requires a logged-in `admin` session.
-- Panel APIs no longer support Bearer credentials or revocable API tokens. Automation smoke checks should call `/api/auth/login` first and reuse the session cookie.
-
-## Image Size Statistics
-
-- The Storage page can queue manifest/blob recalculation in the background. Page requests read SQLite cache and do not perform heavy full scans.
-- Manifest requests send Docker schema2, OCI manifest, OCI index, and Docker manifest list `Accept` headers.
-- Tags show logical size, deduplicated size, shared blob count, and multi-platform breakdown.
-- Repository size deduplicates by blob digest, while physical Registry usage scans `data/registry/docker/registry/v2/blobs/sha256` separately.
-- If Registry is temporarily unavailable, `/api/storage` still returns deletion marks, cached stats, and a readable error.
-
-## v3 Management
-
-- Concurrent sync: `sync_concurrency` defaults to `2`; the sync worker locks each target image so the same tag is not written concurrently.
-- Retry policy: `sync_retry_count` controls max retries; copy failures use exponential backoff, and the panel can retry failed runs or failed items.
-- Storage management: the panel shows local Registry repositories, tags, estimated usage, deletion marks, and garbage collection guidance.
-- Notifications: configure `NOTIFY_WEBHOOK_URL` or the panel webhook setting to send sync failure, recovery, and low disk space events.
-- Authentication boundary: backend APIs accept only the session cookie created by account/password login. The panel should still sit behind a reverse proxy with optional Basic Auth or trusted IP limits before public exposure.
-- Import/export: the panel can export, merge import, and replace import mirror lists for backup and restore.
-- Sync preflight: the panel can run single-image or batch read-only checks for image config, credentials, tag protection, and `latest` risk. Remote probes for upstream manifests and target Registry `/v2/` run only when explicitly enabled.
-
-## v4 Platform Extensions
-
-- Multiple Registry targets: `config/mirrors.yml` supports `registries`, and the panel can manage Registry targets.
-- Multiple mirror groups: `mirror_groups` organize mirrors by project, environment, namespace, and Registry.
-- Grouped views: the Platform page groups mirrors by project, environment, namespace, and mirror group.
-- External database configuration: SQLite remains the default; `DATABASE_URL` or `settings.database_url` can reserve PostgreSQL/MySQL configuration.
-- Audit logs: panel write operations and important sync actions are stored in `audit_logs` and shown in the Audit page.
-- Extension assessment: the panel documents single-node, multi-instance, remote worker, and queued sync modes while keeping single-node Compose as the default path.
-
-## v2 Operations
-
-- `sync` uses `skopeo copy` and no longer depends on host Docker CLI or `/var/run/docker.sock`.
-- Runtime data is stored in SQLite by default: `data/mirror-registry.db`.
-- The panel has a sync runs view for each run and per-image result.
-- The panel has a diagnostics view for Registry, config, data, SQLite, current image tag, app version, and sync heartbeat checks.
-- The UI defaults to a light operations theme. Dark theme is stored in browser local storage; login state is stored in an HttpOnly cookie.
-
 ## Local Development
-
-Use the development compose file when you need to build source images locally:
 
 ```powershell
 docker compose -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.dev.yml ps
 ```
 
+Frontend checks:
+
+```powershell
+npm.cmd --prefix panel run typecheck
+npm.cmd --prefix panel run build
+```
+
+Python checks:
+
+```powershell
+python scripts\verify.py
+python -m pytest --basetemp .pytest-basetemp
+```
+
+Full local check:
+
+```powershell
+.\scripts\check-runtime.ps1
+```
+
 ## Configuration
 
-For production, maintain mirror configuration through the panel; first startup creates a default config automatically. For local development, you can still edit `config/mirrors.yml` directly:
+For production, maintain mirrors through the panel. For development, you can edit `config/mirrors.yml` directly:
 
 ```yaml
 mirrors:
@@ -269,7 +183,7 @@ settings:
   sync_retry_count: 2
 ```
 
-After changing `check_interval_minutes`, restart the sync service if you need the scheduler interval to apply immediately:
+Restart sync if you need a changed interval to apply immediately:
 
 ```powershell
 docker compose restart sync
@@ -277,87 +191,4 @@ docker compose restart sync
 
 ## Storage Cleanup
 
-Deletion marks in the panel record cleanup intent only. To actually release Registry storage, delete the relevant manifests first, then run garbage collection:
-
-```powershell
-docker compose stop registry
-docker compose run --rm registry registry garbage-collect /etc/docker/registry/config.yml
-docker compose up -d registry
-```
-
-## Local Checks
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe scripts\verify.py
-.\scripts\check-runtime.ps1
-npm.cmd --prefix panel run build
-.\.venv\Scripts\python.exe -m pytest
-docker compose config
-docker compose -f docker-compose.dev.yml config
-```
-
-On Linux/macOS or in containers, use the equivalent commands:
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/python scripts/verify.py
-(cd panel && npm run build)
-.venv/bin/python -m pytest
-docker compose config
-docker compose -f docker-compose.dev.yml config
-```
-
-If Docker is not available in the current environment, skip only the two compose config checks; before committing, still pass `scripts/verify.py`, frontend build, and pytest.
-
-`sync` needs `skopeo` at runtime. The default target Registry inside Compose is `registry:5000`; when config uses `localhost:5000/...`, sync rewrites that target to the internal address for copy operations.
-
-## Development Images
-
-Development images are built and pushed by GitHub Actions. Run the local script to push the current branch and dispatch the `Dev Images` workflow:
-
-```powershell
-.\scripts\build-dev-images.ps1
-```
-
-Optional overrides:
-
-```powershell
-$env:MIRROR_REGISTRY_DEV_TAG="dev"
-$env:MIRROR_REGISTRY_DEV_REF="dev"
-$env:MIRROR_REGISTRY_DEV_REMOTE="origin"
-.\scripts\build-dev-images.ps1
-```
-
-The script requires GitHub CLI:
-
-```powershell
-gh auth login
-```
-
-It refuses to run with uncommitted changes because GitHub Actions can only build commits available on GitHub.
-
-The workflow publishes linux/amd64 dev images to GHCR:
-
-- `ghcr.io/paimoncai/mirror-registryx-panel:dev`
-- `ghcr.io/paimoncai/mirror-registryx-panel:dev-<sha>`
-- `ghcr.io/paimoncai/mirror-registryx-sync:dev`
-- `ghcr.io/paimoncai/mirror-registryx-sync:dev-<sha>`
-
-## Release Images
-
-Release images are built and published by GitHub Actions only when a tag matching `v*` is pushed:
-
-```powershell
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-The workflow publishes linux/amd64 images to GHCR:
-
-- `ghcr.io/paimoncai/mirror-registryx-panel:<tag>`
-- `ghcr.io/paimoncai/mirror-registryx-panel:latest`
-- `ghcr.io/paimoncai/mirror-registryx-sync:<tag>`
-- `ghcr.io/paimoncai/mirror-registryx-sync:latest`
+Deletion marks in the panel record cleanup intent only. To actually release Registry storage, delete manifests according to Docker Registry rules and then run garbage collection. Back up the data volume first on personal deployments.

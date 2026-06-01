@@ -309,11 +309,6 @@ function Test-EnvironmentSecurity {
         Add-SecurityIssue "ADMIN_PASSWORD is empty, weak, or a placeholder."
     }
 
-    $secretKeyValue = Get-ConfigValue -Name "CREDENTIALS_SECRET_KEY"
-    if (Test-PlaceholderValue -Value $secretKeyValue -Placeholders @("change-me", "changeme", "replace-with-a-long-random-secret")) {
-        Add-SecurityIssue "CREDENTIALS_SECRET_KEY is empty or a placeholder."
-    }
-
     $cookieSecure = (Get-ConfigValue -Name "SESSION_COOKIE_SECURE" -Default "false").Trim().ToLowerInvariant()
     if ($PanelUrl.Trim().ToLowerInvariant().StartsWith("https://") -and $cookieSecure -notin @("1", "true", "yes")) {
         Add-SecurityIssue "PanelUrl is HTTPS but SESSION_COOKIE_SECURE is not true."
@@ -374,25 +369,6 @@ function Test-PanelApis {
 
         $sessionStatus = Invoke-PanelJson -Method "GET" -Path "/status" -WebSession $script:PanelSession
         Write-Host "Session status: total mirrors=$($sessionStatus.total), synced=$($sessionStatus.synced)"
-
-        $diagnostics = Invoke-PanelJson -Method "POST" -Path "/diagnostics/run" -WebSession $script:PanelSession -Body @{}
-        $diagnosticErrors = @()
-        foreach ($check in @($diagnostics.checks)) {
-            if ($check.status -eq "error") {
-                $diagnosticErrors += "$($check.name): $($check.message)"
-            } elseif ($check.status -eq "warn") {
-                Add-WarningMessage "Diagnostic warning: $($check.name): $($check.message)"
-            }
-        }
-        if ($diagnosticErrors.Count -gt 0) {
-            throw "Diagnostic errors: $($diagnosticErrors -join '; ')"
-        }
-
-        $verify = Invoke-PanelJson -Method "POST" -Path "/backup-restore/verify" -WebSession $script:PanelSession -Body @{ require_credentials_secret = $true }
-        if (-not $verify.ok) {
-            $failed = @($verify.checks | Where-Object { -not $_.ok } | ForEach-Object { $_.name }) -join ", "
-            throw "Backup restore readiness failed: $failed"
-        }
     }
 }
 

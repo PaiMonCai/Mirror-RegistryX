@@ -2,26 +2,17 @@
 
 [English](README.en.md)
 
-单机私有 Docker 镜像仓库，包含轻量管理面板和定时镜像同步服务。适合在内网或个人服务器上缓存、同步常用上游镜像。
+单机私有 Docker 镜像缓存服务，包含本地 Registry、管理面板和定时同步 worker。这个项目按个人服务器使用场景收敛：核心目标是能登录、能配置镜像、能保存仓库凭据、能同步、能查看任务和日志。
 
 ## 服务组成
 
-- `registry`：官方 `registry:2`，镜像层数据保存在 `data/registry`。
-- `panel`：FastAPI 后端和静态管理面板，默认监听 `8080` 端口。
-- `sync`：Python 同步任务，定时检查上游镜像 digest，发现变化后用 `skopeo copy` 同步到本地 Registry。
-
-## 项目结构
-
-- `panel/main.py`：FastAPI ASGI 兼容入口，实际实现委托给 `panel/app.py`。
-- `panel/app.py`：管理面板 API、路由注册和后端业务编排。
-- `panel/schemas.py`：面板请求模型和字段约束。
-- `sync/sync.py`：同步 worker 兼容入口，实际实现委托给 `sync/worker.py`。
-- `sync/worker.py`：定时调度、触发器轮询和 `skopeo` 同步执行逻辑。
-- `mirror_registry_core/`：panel 和 sync 共享的默认配置等公共能力。
+- `registry`：官方 `registry:2`，保存本地镜像层数据。
+- `panel`：FastAPI + React 管理面板，默认监听 `8080`。
+- `sync`：Python worker，使用 `skopeo copy` 把上游镜像同步到本地 Registry。
 
 ## 生产部署
 
-生产服务器直接拉取已发布镜像，不在服务器上构建项目。部署目录只需要 `docker-compose.yml` 和 `.env`，运行数据由 Docker named volumes 保存：
+生产服务器直接拉取已发布镜像，不在服务器上构建：
 
 ```powershell
 docker compose pull
@@ -29,19 +20,25 @@ docker compose up -d
 docker compose ps
 ```
 
-也可以把更新命令合并为一行执行：`docker compose pull && docker compose up -d`。
+也可以合并执行：
 
-启动后打开 `http://localhost:8080`。
+```powershell
+docker compose pull && docker compose up -d
+```
 
-生产 compose 不再依赖项目内的 `config/` 和 `data/` 文件夹：
+启动后访问：
 
-- `mirror-registry-config`：保存面板生成的 `mirrors.yml`。
-- `mirror-registry-data`：保存 SQLite、日志、触发文件和同步状态。
-- `mirror-registry-storage`：保存 Registry 镜像层数据，并只读挂载给面板做存储统计。
+```text
+http://localhost:8080
+```
 
-首次启动时，面板会在配置卷中自动初始化默认 `busybox` 镜像配置。
+生产 compose 使用 Docker named volumes 保存运行数据：
 
-面板默认使用账号密码登录。如果要暴露管理面板，先在 `.env` 中设置强管理员密码，并为仓库凭据设置强随机主密钥：
+- `mirror-registry-config`：面板生成的 `mirrors.yml`。
+- `mirror-registry-data`：SQLite、日志、触发文件和同步状态。
+- `mirror-registry-storage`：Registry 镜像层数据。
+
+## .env 示例
 
 ```dotenv
 ADMIN_USERNAME=admin
@@ -62,216 +59,111 @@ NOTIFY_WEBHOOK_URL=
 NOTIFY_DEDUPE_SECONDS=1800
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
-CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
-`SESSION_COOKIE_SECURE=true` 适用于 HTTPS 入口；本机或纯 HTTP 内网测试可保持 `false`。`SESSION_COOKIE_SAMESITE` 默认 `lax`，生产环境通常不需要改成 `none`。首次启动时，如果数据卷里还没有管理员，面板会用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 初始化单管理员账号。
+`SESSION_COOKIE_SECURE=false` 适合 HTTP 内网访问；如果面板放到 HTTPS 后面，再改成 `true`。如果登录接口返回 200，但随后 `/api/auth/me` 仍是 401，优先检查这里是否在 HTTP 场景误设成了 `true`。
 
-`MIRROR_REGISTRY_IMAGE_TAG` 默认是 `latest`。如果要锁定正式版本，可以改成指定 tag：
+首次启动时，如果数据卷里没有管理员，面板会用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 初始化账号。
 
-```dotenv
-MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
-```
+## 终端重置登录密码
 
-浏览器和面板 API 都使用登录后的 HttpOnly session cookie。面板 API 不再支持 Bearer 凭据或可撤销 API token；面板「安全」页和 `/api/security-checks` 会检查弱管理员密码、Cookie Secure 和凭据主密钥。远程 worker 仍通过 `WORKER_TOKEN` 和 `X-Worker-Token` 调用 `/api/workers/*`。
-
-### 终端重置登录密码
-
-管理员忘记密码或无法登录面板时，可以在部署主机通过终端救援。默认重置 `ADMIN_USERNAME` 指定的用户，未设置时为 `admin`，命令会隐藏输入并二次确认新密码：
+忘记面板密码时，在部署主机执行：
 
 ```powershell
 docker compose exec panel python -m panel.password_reset admin
 ```
 
-如果 panel 容器已经停止，可使用一次性容器执行：
+如果 panel 容器已经停止：
 
 ```powershell
 docker compose run --rm --no-deps panel python -m panel.password_reset admin
 ```
 
-在源码工作区或宿主机虚拟环境中，也可以使用包装脚本：
+源码工作区也可以用包装脚本：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\reset-admin-password.py admin
 ```
 
-默认只允许重置已存在用户；需要首次救援创建账号时才显式增加 `--create-if-missing`，默认角色为 `admin`。外部数据库或临时 SQLite 文件可通过 `DATABASE_URL` 环境变量或 `--database-url` 覆盖。命令支持 `--password` 用于非交互自动化，但不推荐在人工终端中使用，因为明文可能进入 shell 历史。重置完成后会删除该用户所有 session，并写入 `action=password_reset`、`actor=terminal` 的审计日志，审计内容不会记录明文密码。
+默认只重置已存在用户。确实需要救援创建账号时再加：
 
-### 生产 smoke 验收
+```powershell
+docker compose run --rm --no-deps panel python -m panel.password_reset admin --create-if-missing
+```
 
-生产验收以 `scripts\prod-smoke.ps1` 或 Linux/macOS 版 `scripts/prod-smoke.sh` 为准。默认模式只做安全检查和只读探测，不会拉镜像、启动或重启服务：
+外部数据库或临时 SQLite 文件可以用 `--database-url` 覆盖。命令会隐藏输入并二次确认密码，重置后删除该用户所有 session，并写入不含明文密码的审计记录。
+
+## 仓库凭据
+
+面板「仓库凭据」页保存源仓库或目标 Registry 的用户名和 token/password。新版本不再要求额外主密钥才能保存新凭据，适合个人单机部署。
+
+如果是旧版本保存过的加密凭据，同步日志可能提示旧凭据无法解密。处理方式很简单：打开「仓库凭据」，编辑对应 GHCR/Docker Hub 凭据，重新输入 token/password 并保存一次。保存后的新凭据会被 sync worker 正常读取。
+
+## 常用操作
+
+```powershell
+docker compose logs -f panel
+docker compose logs -f sync
+docker compose restart panel sync
+docker compose pull && docker compose up -d
+```
+
+手动同步可以在面板点「立即同步」，也可以调用：
+
+```powershell
+curl -X POST http://localhost:8080/api/sync
+```
+
+## 生产 smoke
+
+smoke 只检查核心链路：环境、compose、登录、`/api/status`、Registry `/v2/`，以及在显式启动服务时可选触发一次同步。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1
 ```
 
+Linux/macOS：
+
 ```bash
 scripts/prod-smoke.sh
 ```
 
-新机器或明确要启动服务时，显式传入 `-StartServices` / `--start-services`：
+如果要让脚本拉镜像并启动服务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -StartServices
 ```
 
-```bash
-scripts/prod-smoke.sh --start-services
-```
-
-脚本默认按生产门禁处理 `.env`：`ADMIN_PASSWORD` 不能为空或占位值，`CREDENTIALS_SECRET_KEY` 必须设置；如果 `PanelUrl` 使用 HTTPS，则 `SESSION_COOKIE_SECURE` 必须为 `true`。本机试跑可用 `-AllowInsecureLocal` / `--allow-insecure-local` 把这些安全项降级为 warning：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecureLocal
-```
-
-```bash
-scripts/prod-smoke.sh --allow-insecure-local
-```
-
-完整 smoke 会检查 Docker Compose 配置、面板账号密码登录、Registry `/v2/`、诊断 API、备份恢复只读校验；在 `-StartServices` / `--start-services` 且未传 `-SkipSync` / `--skip-sync` 时，还会触发默认镜像同步并确认本地 Registry 中出现 `library/busybox:latest`。如果管理员账号已经在旧数据卷中初始化且密码不同，可通过 `-AdminUsername` / `--admin-username` 和 `-AdminPassword` / `--admin-password` 覆盖登录凭据。
-
-Linux/macOS 还提供轻量 E2E 链路脚本，面向已运行的测试环境。它会创建临时镜像配置、执行本地 preflight、检查队列 / 历史 / 诊断 / 可观测 API，并在结束时清理测试配置；默认不触发真实同步，避免污染 Registry：
-
-```bash
-scripts/e2e-smoke.sh
-```
-
-如需覆盖真实同步链路，可显式传入 `--run-sync`，并建议配合测试环境使用独立 `.env` / 数据卷。
-
-### 运维摘要和发布检查
-
-概览页会加载 `/api/ops/summary`，集中展示健康状态、最近同步失败、磁盘状态、删除标记和当前版本。常见认证、TLS、网络、DNS、manifest、磁盘和 `skopeo` 错误会映射为可读原因与建议，原始错误仍保留在任务明细中。
-
-面板「可观测」页会加载 `/api/observability/summary`，展示 24h/7d 同步成功率、失败聚合、同步趋势、磁盘状态、删除标记积压和当前告警。外部脚本可拉取 `/api/observability/metrics` 获取轻量 metrics JSON；告警 webhook 继续由 sync worker 发送，并通过 `NOTIFY_DEDUPE_SECONDS` 控制同类事件去重窗口。
-
-需要给他人排障时，可在概览页导出诊断包，或调用 `/api/ops/diagnostic-bundle`。诊断包包含版本、配置摘要、诊断结果、最近任务、最近失败和事件，但会脱敏 password、token、session cookie、authfile、Authorization 和加密凭据字段。升级说明可通过 `/api/ops/upgrade-guide` 查看，覆盖环境变量、数据卷、备份和兼容性检查。
-
-### 安装升级
-
-面板「安装升级」页和 `/api/install-upgrade/guide` 会把首次安装、升级、验证和回滚路径整理成只读清单；`/api/install-upgrade/preflight` 可检查当前运行版本、`MIRROR_REGISTRY_IMAGE_TAG`、管理员初始化、`CREDENTIALS_SECRET_KEY`、数据卷、磁盘空间和 `/api/sync-queue` 活动任务。首次部署也可以调用 `/api/setup/checklist` 获取同一套初始化检查。
-
-在部署宿主机上可用脚本生成离线 JSON 报告，便于内网或不能访问面板时排查：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\upgrade-check.ps1 -ExpectedTag v1.0.0 -ReportPath .\upgrade-check.json
-```
-
-推荐升级顺序是先运行 `scripts\upgrade-check.ps1`，再执行 `scripts\migration-report.ps1` 或备份数据卷，确认队列清空后运行 `docker compose pull && docker compose up -d`，最后用 `scripts\prod-smoke.ps1 -AllowInsecureLocal` 或生产参数复核。回滚只修改 `.env` 中的 `MIRROR_REGISTRY_IMAGE_TAG` 为上一版本 tag，再重新执行 `docker compose pull && docker compose up -d`；面板和脚本只生成命令清单，不会自动修改生产文件或删除数据。
-
-正式发版前可使用本地 release checklist 阻断缺少版本号、镜像 tag、版本说明、README 或 smoke 结果的发布准备：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1.0.0 -ImageTag v1.0.0 -SmokeResultPath .\smoke-result.txt
-```
-
-`ImageTag` 默认不允许使用 `latest`，除非显式传入 `-AllowLatest`。如果只想检查版本说明和 smoke 文件而暂时跳过构建，可传入 `-SkipBuildChecks`；正式发布前仍应运行完整校验。
-
-## 前端工程化与仓库凭据
-
-- 管理面板前端使用 React + Vite + TypeScript 开发，构建产物继续由 FastAPI 静态托管。
-- 本地修改前端后运行 `npm.cmd run build`，生产镜像构建会在 Node 阶段执行前端 build，运行阶段不需要 Node.js。
-- 面板「仓库凭据」页可加密保存源仓库和目标仓库的用户名 + token/password。
-- 凭据支持 host 默认和单条镜像覆盖，匹配优先级为 mirror 覆盖 > host 默认 > 无凭据。
-- 生产环境保存凭据前必须设置 `CREDENTIALS_SECRET_KEY`；secret 不回显、不明文导出、不写入日志和审计详情。
-- sync 会在执行 `skopeo inspect/copy` 前生成临时 authfile，并在命令结束后清理。
-- 面板登录使用单管理员账号和 session cookie；登录成功、失败和退出会写入审计，但不会记录密码或 session token。
-
-## 仓库治理与备份恢复
-
-- 面板「仓库治理」页支持 tag 保护规则，生产环境、正式 release tag 和显式规则命中的 tag 会阻止删除标记、保留策略和自动覆盖。
-- 保留策略先执行 dry-run，列出候选 repo/tag、匹配原因和被保护跳过的 tag；应用策略只生成删除标记，不直接删除 manifest。
-- 「存储管理」保留搜索和镜像详情 API，可关联 tag 来源、digest、同步任务、删除标记和保护状态。
-- 凭据测试会区分认证失败、网络失败、Registry 不可达和权限不足，并保持 token/password 脱敏。
-- 备份恢复清单覆盖 `config/`、`data/registry/`、`data/mirror-registry.db`、`.env` 和 `CREDENTIALS_SECRET_KEY`，恢复时先做只读验证再启动 sync。
-- 恢复演练可通过面板「仓库治理」页或 `scripts\restore-drill.ps1` 生成只读报告，验证备份包结构、SQLite、Registry 数据目录和凭据主密钥，不会启动 sync。
-- 安全指南区分管理面板 HTTPS 入口和 Registry `/v2/` HTTPS 入口，sync 不需要暴露入站端口。
-
-## 跨机器迁移
-
-- 面板提供 `/api/migration/plan`、`/api/migration/package-manifest` 和 `/api/migration/preflight`，用于生成只读迁移向导、备份清单和迁移前检查。
-- `scripts\migration-report.ps1` 可在源机器或目标机器输出 JSON 报告，检查 `config/`、`data/registry/`、`data/mirror-registry.db`、`.env`、`CREDENTIALS_SECRET_KEY`、Docker 和磁盘空间。
-- 默认迁移流程不会自动替换目标数据卷；先等待 `/api/sync-queue` 清空，再停止 registry、打包数据、还原到目标机器并运行恢复演练。
-- 如果旧数据卷的 `CREDENTIALS_SECRET_KEY` 不一致，面板只能读到加密凭据但无法解密，应停止 panel/sync 后恢复原始密钥再重试。
-
-## 自动发布与计划推送
-
-- `Dev Images` workflow 支持手动触发和 nightly 定时触发，定时镜像只发布 `nightly-YYYYMMDD` 和 `dev-<sha>`，不会覆盖正式 `latest`。
-- 正式镜像仍只由 `v*` tag 触发，`latest` 继续代表最新正式版本。
-- 面板「计划推送」页可创建业务镜像推送策略，默认关闭；cron 使用 UTC，例如 `0 18 * * *` 对应北京时间 02:00。
-- cron 支持标准 5 段表达式，字段支持 `*`、`*/n`、数字和逗号列表；面板会显示上次运行、下次运行和最近失败原因。
-- 计划推送支持编辑、启用/停用、手动运行和删除。
-- 手动运行、创建、修改和 sync 执行结果都会写入审计；失败会进入任务历史、文本日志、事件和 webhook。
-- 计划推送默认不允许覆盖 `latest`，必须显式勾选允许，并且仍会受到 tag 保护规则约束。
-
-## 同步队列
-
-- 手动同步、单镜像同步、导入后同步、计划推送和失败重试都会进入 SQLite 持久化 `sync_queue`，worker 按优先级消费。
-- 面板「同步任务」页展示同步队列，可对 `queued` 任务暂停、恢复、取消，也可对 `completed`、`failed`、`canceled` 任务重放。
-- API 可通过 `GET /api/sync-queue` 查看队列，并通过 `/api/sync-queue/{id}/pause`、`resume`、`cancel`、`replay` 控制任务。
-- worker 启动时会把未完成的 `running` / `cancel_requested` 任务恢复为可重试队列项，旧 `.trigger` 文件仍会被兼容转换为队列任务。
-
-## 远程 Worker
-
-- 默认单机 `sync` worker 仍直接消费本地 `sync_queue`，同时会把 `WORKER_ID`、`WORKER_NAME`、`WORKER_LABELS` 心跳写入 `workers`。
-- 面板「Worker」页和 `GET /api/workers` 可查看本地或远程执行节点、最近心跳、标签、能力和最近领取任务。
-- 远程 worker 预留 `WORKER_TOKEN` 最小权限入口，通过 `X-Worker-Token` 调用 `/api/workers/heartbeat`、`/api/workers/claim` 和 `/api/workers/complete`。
-- `WORKER_TOKEN` 不授予管理员面板权限；泄露时应在 `.env` 中轮换并重启 panel。
-
-## 轻量访问控制
-
-- 面板「访问控制」页只提供本地用户和角色管理；角色分为 `admin`、`operator`、`viewer`。
-- `admin` 登录后拥有完整面板权限，`operator` 可执行写操作，`viewer` 只能查看状态、任务、存储、诊断和审计。
-- 用户管理 API 保留为 `/api/access/users`，并要求已登录的 `admin` session。
-- 面板 API 不再支持 Bearer 凭据或可撤销 API token；自动化验收需要先通过 `/api/auth/login` 获取 session cookie。
-
-## 镜像体积统计
-
-- 存储页支持后台重算 manifest/blob 统计，默认读取 SQLite 缓存，不在页面请求中执行重型全量扫描。
-- manifest 请求会设置 Docker schema2、OCI manifest、OCI index 和 Docker manifest list 的 `Accept` 头。
-- tag 展示逻辑体积、去重体积、共享层数量和多架构 platform breakdown。
-- 仓库体积按 blob digest 去重，Registry 物理占用单独扫描 `data/registry/docker/registry/v2/blobs/sha256`。
-- Registry 暂时不可用时，`/api/storage` 仍会返回删除标记、缓存统计和可读错误。
-
-## v3 管理增强能力
-
-- 并发同步：`sync_concurrency` 默认 `2`，同一目标镜像写入时会加锁，避免并发写入同一个 tag。
-- 重试策略：`sync_retry_count` 控制最大重试次数，失败复制使用指数退避；面板可重试失败任务或失败明细。
-- 存储管理：面板展示本地 Registry 仓库、tag、估算占用、删除标记和垃圾回收指引。
-- 通知能力：配置 `NOTIFY_WEBHOOK_URL` 或面板 webhook 后，会发送同步失败、失败恢复和磁盘空间不足事件。
-- 认证增强：后台 API 只接受账号密码登录后的 session cookie；公网暴露前仍建议放在反向代理后，并可叠加 Basic Auth 或可信 IP 限制。
-- 导入导出：面板支持镜像列表 JSON 导出、合并导入和覆盖导入，用于备份和恢复。
-- 同步预检：面板支持单条和批量预检，默认只读检查镜像配置、凭据、tag 保护和 latest 风险；显式启用远程探测后才访问上游 manifest 和目标 Registry `/v2/`。
-
-## v4 平台化扩展能力
-
-- 多 Registry 目标：`config/mirrors.yml` 支持 `registries`，面板提供 Registry 目标管理入口。
-- 多镜像组：`mirror_groups` 可按项目、环境、命名空间和 Registry 组织镜像。
-- 分组展示：面板「平台配置」页按项目、环境、命名空间和镜像组聚合展示。
-- 外部数据库配置：默认仍使用 SQLite；可通过 `DATABASE_URL` 或 `settings.database_url` 预留 PostgreSQL/MySQL 配置。
-- 审计日志：面板写操作和 sync 关键操作会写入 `audit_logs`，面板「审计」页可查看。
-- 扩展评估：面板提供单机、多实例、远程 worker、队列化同步的状态说明；默认部署路径仍是单机 compose。
-
-## v2 运维能力
-
-- `sync` 使用 `skopeo copy` 同步镜像，不再依赖宿主机 Docker CLI，也不再挂载 `/var/run/docker.sock`。
-- 运行数据默认写入 SQLite：`data/mirror-registry.db`。
-- 面板提供「同步任务」页，展示每轮同步任务和每个镜像的结果。
-- 面板提供「验证诊断」页，检查 Registry、配置目录、数据目录、SQLite、当前镜像 tag、版本信息和 sync 心跳。
-- UI 默认浅色主题，深色主题保存在浏览器 local storage；登录态通过 HttpOnly cookie 保存。
-
 ## 本地开发
-
-本地开发需要构建源码镜像时，使用开发 compose 文件：
 
 ```powershell
 docker compose -f docker-compose.dev.yml up -d --build
 docker compose -f docker-compose.dev.yml ps
 ```
 
-## 镜像同步配置
+前端修改后构建：
 
-生产部署建议在管理面板中维护镜像配置；首次启动会自动生成默认配置。本地开发时也可以直接编辑 `config/mirrors.yml`：
+```powershell
+npm.cmd --prefix panel run typecheck
+npm.cmd --prefix panel run build
+```
+
+Python 验证：
+
+```powershell
+python scripts\verify.py
+python -m pytest --basetemp .pytest-basetemp
+```
+
+完整本地检查：
+
+```powershell
+.\scripts\check-runtime.ps1
+```
+
+## 配置文件
+
+生产环境优先通过面板维护镜像配置。开发时也可以直接编辑 `config/mirrors.yml`：
 
 ```yaml
 mirrors:
@@ -291,7 +183,7 @@ settings:
   sync_retry_count: 2
 ```
 
-修改 `check_interval_minutes` 后，需要重启同步服务让调度间隔立即生效：
+修改 `check_interval_minutes` 后，如需立即生效，重启 sync：
 
 ```powershell
 docker compose restart sync
@@ -299,87 +191,4 @@ docker compose restart sync
 
 ## 存储清理
 
-面板里的删除标记只记录清理意图。真正释放 Registry 空间需要按指引删除 manifest 后，再执行垃圾回收：
-
-```powershell
-docker compose stop registry
-docker compose run --rm registry registry garbage-collect /etc/docker/registry/config.yml
-docker compose up -d registry
-```
-
-## 本地校验
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe scripts\verify.py
-.\scripts\check-runtime.ps1
-npm.cmd --prefix panel run build
-.\.venv\Scripts\python.exe -m pytest
-docker compose config
-docker compose -f docker-compose.dev.yml config
-```
-
-Linux/macOS 或容器内可使用等价命令：
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/python scripts/verify.py
-(cd panel && npm run build)
-.venv/bin/python -m pytest
-docker compose config
-docker compose -f docker-compose.dev.yml config
-```
-
-如果当前环境没有 Docker，只能跳过最后两条 compose 配置检查；提交前仍应至少通过 `scripts/verify.py`、前端 build 和 pytest。
-
-`sync` 服务运行时需要 `skopeo`。默认目标 Registry 是 Compose 内部服务 `registry:5000`；配置里使用 `localhost:5000/...` 时，sync 会在复制时自动改写为内部地址。
-
-## 开发镜像
-
-开发镜像也通过 GitHub Actions 构建和推送。本地只需要执行脚本，把当前分支推送到远端并触发 `Dev Images` workflow：
-
-```powershell
-.\scripts\build-dev-images.ps1
-```
-
-可选环境变量：
-
-```powershell
-$env:MIRROR_REGISTRY_DEV_TAG="dev"
-$env:MIRROR_REGISTRY_DEV_REF="dev"
-$env:MIRROR_REGISTRY_DEV_REMOTE="origin"
-.\scripts\build-dev-images.ps1
-```
-
-脚本依赖 GitHub CLI：
-
-```powershell
-gh auth login
-```
-
-脚本会拒绝在存在未提交修改时运行，因为 GitHub Actions 只能构建已经推送到 GitHub 的提交。
-
-workflow 会发布 linux/amd64 开发镜像到 GHCR：
-
-- `ghcr.io/paimoncai/mirror-registryx-panel:dev`
-- `ghcr.io/paimoncai/mirror-registryx-panel:dev-<sha>`
-- `ghcr.io/paimoncai/mirror-registryx-sync:dev`
-- `ghcr.io/paimoncai/mirror-registryx-sync:dev-<sha>`
-
-## 正式镜像
-
-正式镜像只在推送匹配 `v*` 的 Git tag 时由 GitHub Actions 构建和发布：
-
-```powershell
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-workflow 会发布 linux/amd64 正式镜像到 GHCR：
-
-- `ghcr.io/paimoncai/mirror-registryx-panel:<tag>`
-- `ghcr.io/paimoncai/mirror-registryx-panel:latest`
-- `ghcr.io/paimoncai/mirror-registryx-sync:<tag>`
-- `ghcr.io/paimoncai/mirror-registryx-sync:latest`
+面板里的删除标记只是记录清理意图。真正释放 Registry 空间仍需要按 Docker Registry 的规则删除 manifest 后运行 garbage-collect。个人部署建议先备份数据卷，再做清理。

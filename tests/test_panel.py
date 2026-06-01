@@ -981,7 +981,7 @@ def test_terminal_password_reset_database_url_override(tmp_path, monkeypatch):
     assert panel_auth.verify_password("default-password", panel_auth.user_row("admin")["password_hash"])
 
 
-def test_credentials_require_secret_key(tmp_path, monkeypatch):
+def test_credentials_do_not_require_secret_key(tmp_path, monkeypatch):
     client, _, _, _ = make_panel_client(tmp_path, monkeypatch, credentials_secret_key=None)
     response = client.post(
         "/api/credentials",
@@ -995,9 +995,10 @@ def test_credentials_require_secret_key(tmp_path, monkeypatch):
         headers={},
     )
 
-    assert response.status_code == 400
-    diagnostics = client.post("/api/diagnostics/run").json()
-    assert any(item["name"] == "仓库凭据密钥" and item["status"] == "warn" for item in diagnostics["checks"])
+    assert response.status_code == 200
+    listed = client.get("/api/credentials").json()
+    assert listed[0]["configured"] is True
+    assert "top-secret" not in json.dumps(listed, ensure_ascii=False)
 
 
 def test_governance_blocks_protected_delete_and_retention_marks(panel_app):

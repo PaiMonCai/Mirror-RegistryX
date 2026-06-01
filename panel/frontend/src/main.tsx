@@ -7,23 +7,14 @@ import { navGroups, viewMeta, views } from './navigation';
 import type { AnyRecord, Credential, Mirror, SyncQueueTask, SyncRun, View } from './types';
 import { cx } from './utils';
 import {
-  AccessControl,
-  AuditLogs,
   Credentials,
   Dashboard,
-  Diagnostics,
-  Governance,
-  InstallUpgrade,
   Logs,
   Mirrors,
-  Observability,
-  Platform,
   Runs,
   Schedules,
-  Security,
   SettingsView,
   Storage,
-  Workers,
 } from './views';
 import './styles.css';
 
@@ -37,23 +28,12 @@ function App() {
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [syncQueue, setSyncQueue] = useState<SyncQueueTask[]>([]);
   const [selectedRun, setSelectedRun] = useState<AnyRecord | null>(null);
-  const [platform, setPlatform] = useState<AnyRecord>({});
-  const [grouped, setGrouped] = useState<AnyRecord[]>([]);
   const [storage, setStorage] = useState<AnyRecord>({});
-  const [diagnostics, setDiagnostics] = useState<AnyRecord>({});
   const [logs, setLogs] = useState('');
   const [events, setEvents] = useState<AnyRecord[]>([]);
-  const [access, setAccess] = useState<AnyRecord>({ users: [] });
-  const [security, setSecurity] = useState<AnyRecord>({});
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [schedules, setSchedules] = useState<AnyRecord[]>([]);
-  const [governance, setGovernance] = useState<AnyRecord>({});
-  const [observability, setObservability] = useState<AnyRecord>({});
-  const [workers, setWorkers] = useState<AnyRecord[]>([]);
-  const [workerGuide, setWorkerGuide] = useState<AnyRecord>({});
-  const [installUpgrade, setInstallUpgrade] = useState<AnyRecord>({});
-  const [auditLogs, setAuditLogs] = useState<AnyRecord[]>([]);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
   const api = useMemo(() => createApiClient(), []);
@@ -113,30 +93,13 @@ function App() {
     setSyncQueue(queueRows);
   }
 
-  async function loadPlatform() {
-    setPlatform(await api('GET', '/platform'));
-    setGrouped(await api('GET', '/platform/groups'));
-  }
-
   async function loadStorage() {
     setStorage(await api('GET', '/storage'));
-  }
-
-  async function loadDiagnostics() {
-    setDiagnostics(await api('POST', '/diagnostics/run'));
   }
 
   async function loadLogs() {
     setLogs((await api('GET', '/logs?lines=150')).text || '');
     setEvents(await api('GET', '/events?limit=100'));
-  }
-
-  async function loadAccess() {
-    setAccess({ users: await api('GET', '/access/users') });
-  }
-
-  async function loadSecurity() {
-    setSecurity(await api('GET', '/security-guide'));
   }
 
   async function loadSettings() {
@@ -149,45 +112,6 @@ function App() {
 
   async function loadSchedules() {
     setSchedules(await api('GET', '/schedules'));
-  }
-
-  async function loadGovernance() {
-    const [tagProtection, retentionPolicies, backupRestoreGuide, migrationPlan] = await Promise.all([
-      api('GET', '/tag-protection'),
-      api('GET', '/retention-policies'),
-      api('GET', '/backup-restore-guide'),
-      api('GET', '/migration/plan'),
-    ]);
-    setGovernance({ tagProtection, retentionPolicies, backupRestoreGuide, migrationPlan });
-  }
-
-  async function loadObservability() {
-    const [summary, metrics] = await Promise.all([
-      api('GET', '/observability/summary'),
-      api('GET', '/observability/metrics'),
-    ]);
-    setObservability({ summary, metrics });
-  }
-
-  async function loadWorkers() {
-    const [workerRows, guide] = await Promise.all([
-      api('GET', '/workers'),
-      api('GET', '/workers/guide'),
-    ]);
-    setWorkers(workerRows);
-    setWorkerGuide(guide);
-  }
-
-  async function loadInstallUpgrade() {
-    const [guide, checklist] = await Promise.all([
-      api('GET', '/install-upgrade/guide'),
-      api('GET', '/setup/checklist'),
-    ]);
-    setInstallUpgrade({ guide, checklist });
-  }
-
-  async function loadAudit() {
-    setAuditLogs(await api('GET', '/audit-logs?limit=100'));
   }
 
   useEffect(() => {
@@ -212,17 +136,8 @@ function App() {
         await loadSchedules();
         await loadCredentials();
       }
-      if (view === 'governance') await loadGovernance();
-      if (view === 'observability') await loadObservability();
-      if (view === 'workers') await loadWorkers();
-      if (view === 'install') await loadInstallUpgrade();
-      if (view === 'audit') await loadAudit();
-      if (view === 'platform') await loadPlatform();
       if (view === 'storage') await loadStorage();
-      if (view === 'diagnostics') await loadDiagnostics();
       if (view === 'logs') await loadLogs();
-      if (view === 'access') await loadAccess();
-      if (view === 'security') await loadSecurity();
       if (view === 'settings') await loadSettings();
     };
     load().catch((error) => notify(formatApiError(error)));
@@ -319,17 +234,8 @@ function App() {
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'schedules' && <Schedules schedules={schedules} credentials={credentials} api={api} reload={loadSchedules} notify={notify} />}
-        {view === 'governance' && <Governance governance={governance} api={api} reload={loadGovernance} notify={notify} />}
-        {view === 'observability' && <Observability observability={observability} reload={loadObservability} />}
-        {view === 'workers' && <Workers workers={workers} workerGuide={workerGuide} reload={loadWorkers} />}
-        {view === 'install' && <InstallUpgrade installUpgrade={installUpgrade} api={api} reload={loadInstallUpgrade} notify={notify} />}
-        {view === 'audit' && <AuditLogs auditLogs={auditLogs} reload={loadAudit} />}
-        {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
-        {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}
         {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
-        {view === 'access' && <AccessControl access={access} api={api} reload={loadAccess} notify={notify} />}
-        {view === 'security' && <Security guide={security} />}
           {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}
           </main>
         </div>

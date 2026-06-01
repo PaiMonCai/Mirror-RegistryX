@@ -1,6 +1,9 @@
 import importlib
+import base64
 import json
 from pathlib import Path
+
+import pytest
 
 
 def test_state_round_trip_is_atomic(tmp_path, monkeypatch):
@@ -372,7 +375,7 @@ def test_credentials_match_authfile_and_redaction(tmp_path, monkeypatch):
     assert not Path(authfile).exists()
 
 
-def test_credentials_missing_key_fails_without_secret_leak(tmp_path, monkeypatch):
+def test_plain_credentials_work_without_secret_key(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
     monkeypatch.delenv("CREDENTIALS_SECRET_KEY", raising=False)
@@ -380,13 +383,11 @@ def test_credentials_missing_key_fails_without_secret_leak(tmp_path, monkeypatch
     import sync.sync as sync_main
 
     importlib.reload(sync_main)
-    try:
+    stored = "plain:" + base64.urlsafe_b64encode(b"top-secret").decode("ascii")
+    assert sync_main.decrypt_credential_secret(stored) == "top-secret"
+    with pytest.raises(ValueError) as exc:
         sync_main.decrypt_credential_secret("not-a-valid-token")
-    except ValueError as exc:
-        assert "CREDENTIALS_SECRET_KEY" in str(exc)
-        assert "not-a-valid-token" not in str(exc)
-    else:
-        raise AssertionError("missing CREDENTIALS_SECRET_KEY should fail")
+    assert "not-a-valid-token" not in str(exc.value)
 
 
 def test_sync_blocks_protected_release_tag_before_copy(tmp_path, monkeypatch):

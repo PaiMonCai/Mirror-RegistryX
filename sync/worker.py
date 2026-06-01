@@ -1183,14 +1183,23 @@ def credential_fernet() -> Fernet | None:
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
+PLAIN_SECRET_PREFIX = "plain:"
+
+
 def decrypt_credential_secret(encrypted_secret: str) -> str:
+    value = encrypted_secret or ""
+    if value.startswith(PLAIN_SECRET_PREFIX):
+        try:
+            return base64.urlsafe_b64decode(value.removeprefix(PLAIN_SECRET_PREFIX).encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("仓库凭据格式损坏，请在面板重新保存该凭据") from exc
     fernet = credential_fernet()
     if not fernet:
-        raise ValueError("CREDENTIALS_SECRET_KEY 未配置，无法解密仓库凭据")
+        raise ValueError("旧版本加密仓库凭据无法在当前配置下解密，请在面板重新保存该凭据")
     try:
-        return fernet.decrypt(encrypted_secret.encode("ascii")).decode("utf-8")
+        return fernet.decrypt(value.encode("ascii")).decode("utf-8")
     except InvalidToken as exc:
-        raise ValueError("仓库凭据无法解密，请检查 CREDENTIALS_SECRET_KEY") from exc
+        raise ValueError("旧仓库凭据无法解密，请在面板重新保存该凭据") from exc
 
 
 def load_credentials() -> list[dict]:
