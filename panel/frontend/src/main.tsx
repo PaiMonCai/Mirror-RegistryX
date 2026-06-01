@@ -8,17 +8,22 @@ import type { AnyRecord, Credential, Mirror, SyncQueueTask, SyncRun, View } from
 import { cx } from './utils';
 import {
   AccessControl,
+  AuditLogs,
   Credentials,
   Dashboard,
   Diagnostics,
+  Governance,
+  InstallUpgrade,
   Logs,
   Mirrors,
+  Observability,
   Platform,
   Runs,
   Schedules,
   Security,
   SettingsView,
   Storage,
+  Workers,
 } from './views';
 import './styles.css';
 
@@ -43,6 +48,12 @@ function App() {
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [schedules, setSchedules] = useState<AnyRecord[]>([]);
+  const [governance, setGovernance] = useState<AnyRecord>({});
+  const [observability, setObservability] = useState<AnyRecord>({});
+  const [workers, setWorkers] = useState<AnyRecord[]>([]);
+  const [workerGuide, setWorkerGuide] = useState<AnyRecord>({});
+  const [installUpgrade, setInstallUpgrade] = useState<AnyRecord>({});
+  const [auditLogs, setAuditLogs] = useState<AnyRecord[]>([]);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
   const api = useMemo(() => createApiClient(), []);
@@ -140,6 +151,45 @@ function App() {
     setSchedules(await api('GET', '/schedules'));
   }
 
+  async function loadGovernance() {
+    const [tagProtection, retentionPolicies, backupRestoreGuide, migrationPlan] = await Promise.all([
+      api('GET', '/tag-protection'),
+      api('GET', '/retention-policies'),
+      api('GET', '/backup-restore-guide'),
+      api('GET', '/migration/plan'),
+    ]);
+    setGovernance({ tagProtection, retentionPolicies, backupRestoreGuide, migrationPlan });
+  }
+
+  async function loadObservability() {
+    const [summary, metrics] = await Promise.all([
+      api('GET', '/observability/summary'),
+      api('GET', '/observability/metrics'),
+    ]);
+    setObservability({ summary, metrics });
+  }
+
+  async function loadWorkers() {
+    const [workerRows, guide] = await Promise.all([
+      api('GET', '/workers'),
+      api('GET', '/workers/guide'),
+    ]);
+    setWorkers(workerRows);
+    setWorkerGuide(guide);
+  }
+
+  async function loadInstallUpgrade() {
+    const [guide, checklist] = await Promise.all([
+      api('GET', '/install-upgrade/guide'),
+      api('GET', '/setup/checklist'),
+    ]);
+    setInstallUpgrade({ guide, checklist });
+  }
+
+  async function loadAudit() {
+    setAuditLogs(await api('GET', '/audit-logs?limit=100'));
+  }
+
   useEffect(() => {
     loadAuth();
   }, []);
@@ -162,6 +212,11 @@ function App() {
         await loadSchedules();
         await loadCredentials();
       }
+      if (view === 'governance') await loadGovernance();
+      if (view === 'observability') await loadObservability();
+      if (view === 'workers') await loadWorkers();
+      if (view === 'install') await loadInstallUpgrade();
+      if (view === 'audit') await loadAudit();
       if (view === 'platform') await loadPlatform();
       if (view === 'storage') await loadStorage();
       if (view === 'diagnostics') await loadDiagnostics();
@@ -264,6 +319,11 @@ function App() {
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'schedules' && <Schedules schedules={schedules} credentials={credentials} api={api} reload={loadSchedules} notify={notify} />}
+        {view === 'governance' && <Governance governance={governance} api={api} reload={loadGovernance} notify={notify} />}
+        {view === 'observability' && <Observability observability={observability} reload={loadObservability} />}
+        {view === 'workers' && <Workers workers={workers} workerGuide={workerGuide} reload={loadWorkers} />}
+        {view === 'install' && <InstallUpgrade installUpgrade={installUpgrade} api={api} reload={loadInstallUpgrade} notify={notify} />}
+        {view === 'audit' && <AuditLogs auditLogs={auditLogs} reload={loadAudit} />}
         {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
         {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}

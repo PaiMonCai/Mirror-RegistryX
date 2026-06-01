@@ -69,6 +69,7 @@ def require_paths() -> None:
         "panel/frontend/src/styles.css",
         "panel/frontend/src/vite-env.d.ts",
         "panel/requirements.txt",
+        "panel/password_reset.py",
         "panel/static/index.html",
         "sync/__init__.py",
         "sync/.dockerignore",
@@ -79,6 +80,7 @@ def require_paths() -> None:
         "mirror_registry_core/__init__.py",
         "mirror_registry_core/config.py",
         "scripts/check-runtime.ps1",
+        "scripts/reset-admin-password.py",
         "scripts/prod-smoke.ps1",
         "scripts/restore-drill.ps1",
         "scripts/migration-report.ps1",
@@ -937,6 +939,10 @@ def require_tests_and_docs() -> None:
         "test_check_trigger_converts_legacy_trigger_to_queue",
         "test_sync_queue_consumes_task_and_recovers_running",
         "recover_stale_queue_tasks",
+        "test_terminal_password_reset_updates_user_invalidates_sessions_and_redacts_secret",
+        "test_terminal_password_reset_requires_existing_user_unless_create_requested",
+        "test_terminal_password_reset_database_url_override",
+        "panel.password_reset",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -1003,6 +1009,12 @@ def require_tests_and_docs() -> None:
         "/api/workers",
         "轻量访问控制",
         "/api/access/users",
+        "终端重置登录密码",
+        "docker compose exec panel python -m panel.password_reset admin",
+        "docker compose run --rm --no-deps panel python -m panel.password_reset admin",
+        ".\\.venv\\Scripts\\python.exe scripts\\reset-admin-password.py admin",
+        "--create-if-missing",
+        "--database-url",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -1061,6 +1073,12 @@ def require_tests_and_docs() -> None:
         "/api/workers",
         "Lightweight Access Control",
         "/api/access/users",
+        "Terminal Password Reset",
+        "docker compose exec panel python -m panel.password_reset admin",
+        "docker compose run --rm --no-deps panel python -m panel.password_reset admin",
+        ".\\.venv\\Scripts\\python.exe scripts\\reset-admin-password.py admin",
+        "--create-if-missing",
+        "--database-url",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -1100,6 +1118,8 @@ def require_tests_and_docs() -> None:
         "docker compose config",
         "docker compose -f docker-compose.dev.yml config",
         "npm.cmd run build",
+        "panel\\password_reset.py",
+        "scripts\\reset-admin-password.py",
     ]:
         if snippet not in check_script:
             fail(f"scripts/check-runtime.ps1 missing {snippet!r}")

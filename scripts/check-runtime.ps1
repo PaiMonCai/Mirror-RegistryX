@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 python scripts\verify.py
-python -m py_compile scripts\verify.py sync\sync.py panel\main.py tests\test_panel.py tests\test_sync.py
+python -m py_compile scripts\verify.py scripts\reset-admin-password.py sync\sync.py panel\main.py panel\password_reset.py tests\test_panel.py tests\test_sync.py
 
 if (Get-Command npm.cmd -ErrorAction SilentlyContinue) {
     npm.cmd run build

@@ -75,6 +75,28 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 
 浏览器和面板 API 都使用登录后的 HttpOnly session cookie。面板 API 不再支持 Bearer 凭据或可撤销 API token；面板「安全」页和 `/api/security-checks` 会检查弱管理员密码、Cookie Secure 和凭据主密钥。远程 worker 仍通过 `WORKER_TOKEN` 和 `X-Worker-Token` 调用 `/api/workers/*`。
 
+### 终端重置登录密码
+
+管理员忘记密码或无法登录面板时，可以在部署主机通过终端救援。默认重置 `ADMIN_USERNAME` 指定的用户，未设置时为 `admin`，命令会隐藏输入并二次确认新密码：
+
+```powershell
+docker compose exec panel python -m panel.password_reset admin
+```
+
+如果 panel 容器已经停止，可使用一次性容器执行：
+
+```powershell
+docker compose run --rm --no-deps panel python -m panel.password_reset admin
+```
+
+在源码工作区或宿主机虚拟环境中，也可以使用包装脚本：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\reset-admin-password.py admin
+```
+
+默认只允许重置已存在用户；需要首次救援创建账号时才显式增加 `--create-if-missing`，默认角色为 `admin`。外部数据库或临时 SQLite 文件可通过 `DATABASE_URL` 环境变量或 `--database-url` 覆盖。命令支持 `--password` 用于非交互自动化，但不推荐在人工终端中使用，因为明文可能进入 shell 历史。重置完成后会删除该用户所有 session，并写入 `action=password_reset`、`actor=terminal` 的审计日志，审计内容不会记录明文密码。
+
 ### 生产 smoke 验收
 
 生产验收以 `scripts\prod-smoke.ps1` 或 Linux/macOS 版 `scripts/prod-smoke.sh` 为准。默认模式只做安全检查和只读探测，不会拉镜像、启动或重启服务：

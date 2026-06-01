@@ -666,8 +666,9 @@ def test_mirror_preflight_batch_defaults_to_config_and_remote_probe(panel_app, m
             self.headers = headers or {}
 
     class FakeAsyncClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, **kwargs):
             self.timeout = timeout
+            self.kwargs = kwargs
 
         async def __aenter__(self):
             return self
@@ -849,8 +850,9 @@ def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
     status_holder = {"code": 200}
 
     class FakeAsyncClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, **kwargs):
             self.timeout = timeout
+            self.kwargs = kwargs
 
         async def __aenter__(self):
             return self
@@ -861,7 +863,7 @@ def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
         async def get(self, url, auth):
             assert url == "https://index.docker.io/v2/"
             assert auth == ("alice", "top-secret")
-            return type("Response", (), {"status_code": status_holder["code"]})()
+            return type("Response", (), {"status_code": status_holder["code"], "headers": {}})()
 
     monkeypatch.setattr(panel_main.httpx, "AsyncClient", FakeAsyncClient)
     test_response = client.post("/api/credentials/dockerhub/test", json={}, headers=headers)
@@ -900,6 +902,83 @@ def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
     )
     assert "source_credential_id: dockerhub" in config_path.read_text(encoding="utf-8")
     assert client.delete("/api/credentials/dockerhub", headers=headers).status_code == 400
+
+
+def test_terminal_password_reset_updates_user_invalidates_sessions_and_redacts_secret(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "reset.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    import panel.password_reset as password_reset
+    import panel.auth as panel_auth
+    import panel.db as panel_db
+
+    result = password_reset.reset_panel_password("admin", "new-password", create_if_missing=True)
+
+    assert result.created is True
+    row = panel_auth.user_row("admin")
+    assert row["role"] == "admin"
+    assert panel_auth.verify_password("new-password", row["password_hash"])
+
+    token, _ = panel_auth.create_session("admin")
+    assert panel_auth.session_user(token)["username"] == "admin"
+
+    result = password_reset.reset_panel_password("admin", "changed-password")
+
+    assert result.created is False
+    assert result.sessions_invalidated is True
+    assert panel_auth.verify_password("changed-password", panel_auth.user_row("admin")["password_hash"])
+    assert panel_auth.session_user(token) is None
+
+    audit_text = json.dumps(panel_db.db_rows("SELECT actor, action, resource_type, resource_id, detail FROM audit_logs"), ensure_ascii=False)
+    assert "password_reset" in audit_text
+    assert "terminal" in audit_text
+    assert "changed-password" not in audit_text
+    assert "new-password" not in audit_text
+
+    assert password_reset.main(["admin", "--password", "cli-password", "--database-url", f"sqlite:///{db_path}"]) == 0
+    output = capsys.readouterr().out
+    assert "User password reset: admin" in output
+    assert "cli-password" not in output
+    assert panel_auth.verify_password("cli-password", panel_auth.user_row("admin")["password_hash"])
+
+
+def test_terminal_password_reset_requires_existing_user_unless_create_requested(tmp_path, monkeypatch):
+    db_path = tmp_path / "missing-reset.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    import panel.password_reset as password_reset
+    import panel.auth as panel_auth
+
+    try:
+        password_reset.reset_panel_password("operator", "new-password")
+    except password_reset.PasswordResetError as exc:
+        assert "User not found" in str(exc)
+    else:
+        raise AssertionError("missing user reset should fail without create flag")
+
+    result = password_reset.reset_panel_password("operator", "new-password", create_if_missing=True, role="operator")
+
+    assert result.created is True
+    row = panel_auth.user_row("operator")
+    assert row["role"] == "operator"
+    assert panel_auth.verify_password("new-password", row["password_hash"])
+
+
+def test_terminal_password_reset_database_url_override(tmp_path, monkeypatch):
+    default_db = tmp_path / "default-reset.db"
+    override_db = tmp_path / "override-reset.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{default_db}")
+
+    import panel.password_reset as password_reset
+    import panel.auth as panel_auth
+
+    password_reset.reset_panel_password("admin", "default-password", create_if_missing=True)
+
+    assert password_reset.main(["admin", "--password", "override-password", "--database-url", f"sqlite:///{override_db}", "--create-if-missing"]) == 0
+    assert panel_auth.verify_password("override-password", panel_auth.user_row("admin")["password_hash"])
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{default_db}")
+    assert panel_auth.verify_password("default-password", panel_auth.user_row("admin")["password_hash"])
 
 
 def test_credentials_require_secret_key(tmp_path, monkeypatch):

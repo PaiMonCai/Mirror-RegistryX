@@ -73,6 +73,28 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 
 Browser and panel API access use the HttpOnly session cookie created by login. Panel APIs no longer support Bearer credentials or revocable API tokens. Remote workers still use `WORKER_TOKEN` with `X-Worker-Token` for `/api/workers/*`.
 
+### Terminal Password Reset
+
+If an administrator is locked out of the panel, reset the login password from the deployment host. The default user is `ADMIN_USERNAME`, or `admin` when the variable is not set. The command prompts for the new password with hidden input and confirmation:
+
+```powershell
+docker compose exec panel python -m panel.password_reset admin
+```
+
+If the panel container is stopped, run a one-off container:
+
+```powershell
+docker compose run --rm --no-deps panel python -m panel.password_reset admin
+```
+
+From a source checkout or host virtual environment, use the wrapper script:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\reset-admin-password.py admin
+```
+
+The reset only updates an existing user by default. Add `--create-if-missing` only for explicit recovery creation; the default role is `admin`. Use `DATABASE_URL` or `--database-url` for an external database or a temporary SQLite file. `--password` is available for non-interactive automation but is not recommended for manual terminals because plaintext can land in shell history. A successful reset invalidates all sessions for that user and writes an audit entry with `action=password_reset` and `actor=terminal`; plaintext passwords are never written to audit details.
+
 ### Production Smoke Test
 
 Production acceptance is centered on `scripts\prod-smoke.ps1`. By default, it performs security checks and read-only probes only; it does not pull images, start services, or restart services:
