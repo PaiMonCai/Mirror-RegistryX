@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { LogOut, Moon, Play, Sun, UserRound } from 'lucide-react';
+import { LogOut, Play, Search, UserRound } from 'lucide-react';
 import { ApiError, createApiClient, formatApiError } from './api';
 import { LoginScreen } from './components/LoginScreen';
 import { navGroups, viewMeta, views } from './navigation';
@@ -255,56 +255,62 @@ function App() {
         <div className="orb orb3"></div>
       </div>
       <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">MR</div>
-          <div>
-            <strong>Mirror Registry</strong>
-            <span>scheduled pull / push pipeline</span>
-          </div>
-        </div>
-        <nav aria-label="主导航">
-          {navGroups.map((group) => (
-            <div className="nav-group" key={group.label}>
-              <span className="nav-group-label">{group.label}</span>
-              <div className="nav-group-items">
-                {group.views.map((name) => (
-                  <button key={name} className={cx('nav-button', view === name && 'active')} onClick={() => setView(name)}>
-                    {viewMeta[name].icon}
-                    <span>{viewMeta[name].title}</span>
-                  </button>
-                ))}
-              </div>
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">🐳</div>
+            <div>
+              <strong>MirrorSync</strong>
+              <span>v0.1.0-dev</span>
             </div>
-          ))}
-        </nav>
-        <div className="session-card">
-          <span>当前用户</span>
-          <strong><UserRound size={15} /> {auth.user?.username || 'admin'}</strong>
-          {status.using_default_token && <p className="warn">PANEL_TOKEN 仍为默认值。</p>}
-        </div>
-      </aside>
-
-      <main>
-        <header className="topbar">
-          <div>
-            <h1>{viewMeta[view].title}</h1>
-            <p>{viewMeta[view].subtitle}</p>
           </div>
-          <div className="top-actions">
-            <span className="user-pill"><UserRound size={15} />{auth.user?.username || 'admin'}</span>
-            <button className="ghost" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题">
-              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-            <button className="ghost" onClick={() => action('已退出登录', logout)} title="退出登录">
-              <LogOut size={16} />
-            </button>
-            <button className="primary" onClick={() => action('同步已入队', async () => { await api('POST', '/sync'); await loadStatus(); if (view === 'runs') await loadRuns(); })}>
-              <Play size={16} />立即同步
-            </button>
+          <nav aria-label="主导航">
+            {navGroups.map((group) => (
+              <div className="nav-group" key={group.label}>
+                <span className="nav-group-label">{group.label}</span>
+                <div className="nav-group-items">
+                  {group.views.map((name) => (
+                    <button key={name} className={cx('nav-button', view === name && 'active')} onClick={() => setView(name)}>
+                      {viewMeta[name].icon}
+                      <span>{viewMeta[name].title}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </nav>
+          <div className="session-card">
+            <div className="session-avatar">{String(auth.user?.username || 'admin').slice(0, 2).toUpperCase()}</div>
+            <div className="session-meta">
+              <strong>{auth.user?.username || 'admin'}</strong>
+              <span>{auth.user?.role || '超级管理员'}</span>
+              {status.using_default_token && <p className="warn">PANEL_TOKEN 仍为默认值。</p>}
+            </div>
+            <span aria-hidden="true">↔</span>
           </div>
-        </header>
+        </aside>
 
+        <div className="main">
+          <header className="topbar">
+            <div>
+              <h1>{viewMeta[view].title}</h1>
+              <p>{viewMeta[view].subtitle}</p>
+            </div>
+            <div className="top-actions">
+              <label className="search" aria-label="搜索镜像、仓库">
+                <Search size={14} />
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索镜像、仓库…" />
+              </label>
+              <button onClick={() => setView('mirrors')}>＋ 镜像配置</button>
+              <button className="primary" onClick={() => action('同步已入队', async () => { await api('POST', '/sync'); await loadStatus(); if (view === 'runs') await loadRuns(); })}>
+                <Play size={16} />立即同步
+              </button>
+              <button className="ghost" onClick={() => action('已退出登录', logout)} title="退出登录">
+                <LogOut size={16} />
+              </button>
+            </div>
+          </header>
+
+          <main>
         {view === 'dashboard' && <Dashboard status={status} ops={opsSummary} api={api} notify={notify} reload={() => action('已刷新', loadStatus)} setView={setView} />}
         {view === 'runs' && <Runs runs={runs} syncQueue={syncQueue} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
@@ -321,11 +327,12 @@ function App() {
         {view === 'audit' && <Audit rows={audit} reload={loadAudit} />}
         {view === 'access' && <AccessControl access={access} api={api} reload={loadAccess} notify={notify} />}
         {view === 'security' && <Security guide={security} />}
-        {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}
-      </main>
+          {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}
+          </main>
+        </div>
 
-      {toast && <div className="toast">{toast}</div>}
-    </div>
+        {toast && <div className="toast">{toast}</div>}
+      </div>
     </>
   );
 }
