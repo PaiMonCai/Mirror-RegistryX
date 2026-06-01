@@ -1,0 +1,82 @@
+services:
+  registry:
+    image: registry:2
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+      REGISTRY_HTTP_ADDR: :5000
+    volumes:
+      - mirror-registry-storage:/var/lib/registry
+
+  panel:
+    image: "ghcr.io/paimoncai/mirror-registryx-panel:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    environment:
+      CONFIG_PATH: /config/mirrors.yml
+      STATE_PATH: /data/sync-state.json
+      LOG_PATH: /data/sync.log
+      TRIGGER_PATH: /data/.trigger
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/mirror-registry.db}
+      REGISTRY_URL: http://registry:5000
+      REGISTRY_STORAGE_PATH: /data/registry
+      APP_VERSION: v4
+      MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
+      PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
+      WORKER_TOKEN: ${WORKER_TOKEN:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-mirror_registry_session}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - mirror-registry-config:/config
+      - mirror-registry-data:/data
+      - mirror-registry-storage:/data/registry:ro
+    depends_on:
+      - registry
+
+  sync:
+    image: "ghcr.io/paimoncai/mirror-registryx-sync:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    environment:
+      CONFIG_PATH: /config/mirrors.yml
+      STATE_PATH: /data/sync-state.json
+      LOG_PATH: /data/sync.log
+      TRIGGER_PATH: /data/.trigger
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/mirror-registry.db}
+      SYNC_ENGINE: skopeo
+      APP_VERSION: v4
+      MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
+      SYNC_RETRY_COUNT: ${SYNC_RETRY_COUNT:-2}
+      SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-2}
+      SYNC_RETRY_BACKOFF_SECONDS: ${SYNC_RETRY_BACKOFF_SECONDS:-2}
+      DISK_LOW_BYTES: ${DISK_LOW_BYTES:-2147483648}
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      NOTIFY_DEDUPE_SECONDS: ${NOTIFY_DEDUPE_SECONDS:-1800}
+      SKOPEO_COPY_ALL: ${SKOPEO_COPY_ALL:-1}
+      SKOPEO_DEST_TLS_VERIFY: ${SKOPEO_DEST_TLS_VERIFY:-false}
+      SYNC_TARGET_REGISTRY: registry:5000
+      COMMAND_TIMEOUT_SECONDS: 900
+      CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
+      WORKER_ID: ${WORKER_ID:-local-sync}
+      WORKER_NAME: ${WORKER_NAME:-Local Sync Worker}
+      WORKER_LABELS: ${WORKER_LABELS:-local,sync}
+    volumes:
+      - mirror-registry-config:/config:ro
+      - mirror-registry-data:/data
+    depends_on:
+      - registry
+
+volumes:
+  mirror-registry-config:
+    name: mirror-registry-config
+  mirror-registry-data:
+    name: mirror-registry-data
+  mirror-registry-storage:
+    name: mirror-registry-storage
