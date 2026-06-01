@@ -13,7 +13,7 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
   platform: { title: '平台配置', subtitle: 'Registry 目标、镜像组和多环境视图。', icon: <>⊞</> },
   storage: { title: '存储管理', subtitle: '仓库 tag、删除标记和垃圾回收指引。', icon: <>◫</> },
   diagnostics: { title: '验证诊断', subtitle: '检查依赖、目录、数据库和同步心跳。', icon: <>⊙</> },
-  upgrade: { title: '安装升级', subtitle: '安装、升级、回滚和版本检查清单。', icon: <>⟳</> },
+  upgrade: { title: '安装升级', subtitle: '面向生产运维的版本检查、升级、回滚清单；日常使用可忽略。', icon: <>⟳</> },
   logs: { title: '日志 / 事件', subtitle: '同步日志和结构化事件。', icon: <>≡</> },
   audit: { title: '审计', subtitle: '面板和同步服务的操作记录。', icon: <>⊗</> },
   access: { title: '访问控制', subtitle: '管理本地登录用户和角色。', icon: <>⊛</> },
@@ -24,9 +24,9 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
 export const navGroups: Array<{ label: string; views: View[] }> = [
   { label: '监控', views: ['dashboard', 'mirrors', 'runs', 'observability'] },
   { label: '发布', views: ['credentials', 'governance', 'schedules', 'workers'] },
-  { label: '平台', views: ['platform', 'storage', 'diagnostics', 'upgrade'] },
+  { label: '平台', views: ['platform', 'storage', 'diagnostics'] },
   { label: '记录', views: ['logs', 'audit'] },
-  { label: '系统', views: ['access', 'security', 'settings'] },
+  { label: '系统', views: ['access', 'security', 'settings', 'upgrade'] },
 ];
 
 export const views = navGroups.flatMap((group) => group.views);

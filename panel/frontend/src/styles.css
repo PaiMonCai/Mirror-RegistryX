@@ -1116,6 +1116,10 @@ td.num {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
 }
 
+.roomy-form {
+  margin-top: 12px;
+}
+
 /* Forms */
 .form-body {
   padding: 20px;
