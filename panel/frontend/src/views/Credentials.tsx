@@ -9,6 +9,7 @@ const emptyForm = { id: '', name: '', registry_host: '', username: '', secret: '
 export function Credentials({ credentials, api, reload, notify }: any) {
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState('');
+  const [testUrls, setTestUrls] = useState<Record<string, string>>({});
 
   const isEditing = Boolean(editingId);
 
@@ -27,6 +28,13 @@ export function Credentials({ credentials, api, reload, notify }: any) {
   function cancelEdit() {
     setEditingId('');
     setForm(emptyForm);
+  }
+
+  async function testCredential(credential: AnyRecord) {
+    const registryUrl = (testUrls[credential.id] || '').trim();
+    const result = await api('POST', `/credentials/${encodeURIComponent(credential.id)}/test`, registryUrl ? { registry_url: registryUrl } : {});
+    const target = result.registry_url || result.check_url || credential.registry_host;
+    notify(`${credential.name || credential.id}: ${result.status}，${result.message || ''} ${target ? `(${target})` : ''}`.trim());
   }
 
   async function save() {
@@ -65,8 +73,8 @@ export function Credentials({ credentials, api, reload, notify }: any) {
         </div>
       </Panel>
       <Panel title="已保存凭据">
-        <div className="table-scroll"><table><thead><tr><th>ID</th><th>名称</th><th>Host</th><th>用户名</th><th>Scope</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>{credentials.map((c: AnyRecord) => <tr key={c.id}><td>{c.id}</td><td>{c.name}</td><td>{c.registry_host}</td><td>{c.username}</td><td>{c.scope}</td><td><Badge value={c.configured ? 'configured' : 'empty'} /></td><td className="row-actions"><button onClick={() => editCredential(c)}><Edit3 size={14} />编辑</button><button onClick={() => api('POST', `/credentials/${encodeURIComponent(c.id)}/test`, {}).then((r: AnyRecord) => notify(`测试结果: ${r.status}`))}>测试</button><ConfirmButton confirmText="确认删除" onConfirm={() => api('DELETE', `/credentials/${encodeURIComponent(c.id)}`).then(reload)}><Trash2 size={14} /></ConfirmButton></td></tr>)}</tbody>
+        <div className="table-scroll"><table><thead><tr><th>ID</th><th>名称</th><th>Host</th><th>用户名</th><th>Scope</th><th>状态</th><th>测试 URL（可选）</th><th>操作</th></tr></thead>
+          <tbody>{credentials.map((c: AnyRecord) => <tr key={c.id}><td>{c.id}</td><td>{c.name}</td><td>{c.registry_host}</td><td>{c.username}</td><td>{c.scope}</td><td><Badge value={c.configured ? 'configured' : 'empty'} /></td><td><input className="table-input" placeholder="留空自动判断，如 http://localhost:5000" value={testUrls[c.id] || ''} onChange={(event) => setTestUrls({ ...testUrls, [c.id]: event.target.value })} /></td><td className="row-actions"><button onClick={() => editCredential(c)}><Edit3 size={14} />编辑</button><button onClick={() => testCredential(c)}>测试</button><ConfirmButton confirmText="确认删除" onConfirm={() => api('DELETE', `/credentials/${encodeURIComponent(c.id)}`).then(reload)}><Trash2 size={14} /></ConfirmButton></td></tr>)}</tbody>
         </table></div>
       </Panel>
     </div>

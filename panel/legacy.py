@@ -4261,34 +4261,53 @@ def delete_credential(credential_id: str):
     return {"ok": True}
 
 
+def credential_test_registry_url(row: dict, override: str | None = None) -> tuple[str, str]:
+    raw = (override or row["registry_host"] or "").strip().rstrip("/")
+    if not raw:
+        raise HTTPException(400, "registry_url 不能为空")
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(400, "registry_url 必须是 http:// 或 https:// 地址")
+        base_url = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        return base_url, "manual"
+    host = normalize_registry_host(raw)
+    if host == "docker.io":
+        return "https://registry-1.docker.io", "docker-hub"
+    return f"{registry_scheme_for_host(host)}://{host}", "auto"
+
+
 @app.post("/api/credentials/{credential_id}/test", dependencies=[Depends(require_write_token)])
 async def test_credential(credential_id: str, body: CredentialTestIn | None = None):
     row = credential_row(credential_id)
     secret = decrypt_secret(row["encrypted_secret"])
-    registry_url = (body.registry_url if body else None) or f"https://{row['registry_host']}"
-    registry_url = registry_url.strip().rstrip("/")
-    if "://" not in registry_url:
-        registry_url = f"https://{registry_url}"
-    parsed = urlparse(registry_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(400, "registry_url 必须是 http:// 或 https:// 地址")
+    registry_url, url_source = credential_test_registry_url(row, body.registry_url if body else None)
     check_url = f"{registry_url}/v2/"
+    detail = {"registry_host": row["registry_host"], "registry_url": registry_url, "url_source": url_source}
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
             response = await client.get(check_url, auth=(row["username"], secret))
     except httpx.ConnectError as exc:
-        audit_log("test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "reason": "network"})
-        return {"ok": False, "status": "network_error", "message": f"无法连接 Registry: {exc.__class__.__name__}"}
-    except httpx.TimeoutException:
-        audit_log("test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "reason": "timeout"})
-        return {"ok": False, "status": "timeout", "message": "连接 Registry 超时"}
+        audit_log("test_failed", "credential", row["id"], {**detail, "reason": "network"})
+        return {"ok": False, "status": "network_error", "registry_url": registry_url, "check_url": check_url, "message": f"无法连接 Registry: {exc.__class__.__name__}"}
+    except httpx.ConnectTimeout:
+        audit_log("test_failed", "credential", row["id"], {**detail, "reason": "timeout"})
+        return {"ok": False, "status": "timeout", "registry_url": registry_url, "check_url": check_url, "message": "连接 Registry 超时"}
+    except httpx.ReadTimeout:
+        audit_log("test_failed", "credential", row["id"], {**detail, "reason": "timeout"})
+        return {"ok": False, "status": "timeout", "registry_url": registry_url, "check_url": check_url, "message": "Registry 响应超时"}
+    except httpx.HTTPError as exc:
+        reason = "tls_or_protocol" if isinstance(exc, (httpx.ConnectError, httpx.ProtocolError)) else "http_error"
+        audit_log("test_failed", "credential", row["id"], {**detail, "reason": reason, "error": exc.__class__.__name__})
+        return {"ok": False, "status": reason, "registry_url": registry_url, "check_url": check_url, "message": f"请求 Registry 失败: {exc.__class__.__name__}"}
     if response.status_code in {200, 401, 403}:
         ok = response.status_code == 200
         status = "ok" if ok else ("authentication_failed" if response.status_code == 401 else "permission_denied")
-        audit_log("test_ok" if ok else "test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "status": status})
-        return {"ok": ok, "status": status, "http_status": response.status_code}
-    audit_log("test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "status": "registry_error", "http_status": response.status_code})
-    return {"ok": False, "status": "registry_error", "http_status": response.status_code}
+        message = "凭据可用" if ok else ("认证失败：用户名、token/password 或 Registry 认证方式不匹配" if response.status_code == 401 else "权限不足：凭据有效但没有访问该 Registry 的权限")
+        audit_log("test_ok" if ok else "test_failed", "credential", row["id"], {**detail, "status": status, "http_status": response.status_code})
+        return {"ok": ok, "status": status, "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": message}
+    audit_log("test_failed", "credential", row["id"], {**detail, "status": "registry_error", "http_status": response.status_code})
+    return {"ok": False, "status": "registry_error", "http_status": response.status_code, "registry_url": registry_url, "check_url": check_url, "message": f"Registry 返回非预期状态码: {response.status_code}"}
 
 
 @app.post("/api/registries", dependencies=[Depends(require_write_token)])
