@@ -95,9 +95,9 @@ Use `--database-url` for an external database or a temporary SQLite file. The co
 
 ## Registry Credentials
 
-The Credentials page stores source or target Registry username plus token/password pairs. New credentials no longer require an extra master secret, which keeps single-node personal deployments simple.
+The Credentials page stores source or target Registry username plus token/password pairs.
 
-If credentials were saved by an older version and sync says they cannot be decrypted, open the Credentials page, edit the GHCR/Docker Hub credential, enter the token/password again, and save it once. The newly saved value will be readable by the sync worker.
+If credentials were saved by an older version and sync says they cannot be read, open the Credentials page, edit the GHCR/Docker Hub credential, enter the token/password again, and save it once.
 
 ## Common Commands
 

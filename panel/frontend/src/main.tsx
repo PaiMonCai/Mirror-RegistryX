@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { LogOut, Play, Search, UserRound } from 'lucide-react';
+import { LogOut, Play, Search } from 'lucide-react';
 import { ApiError, createApiClient, formatApiError } from './api';
 import { LoginScreen } from './components/LoginScreen';
-import { navGroups, viewMeta, views } from './navigation';
+import { navGroups, viewMeta } from './navigation';
 import type { AnyRecord, Credential, Mirror, SyncQueueTask, SyncRun, View } from './types';
 import { cx } from './utils';
 import {
@@ -12,7 +12,6 @@ import {
   Logs,
   Mirrors,
   Runs,
-  Schedules,
   SettingsView,
   Storage,
 } from './views';
@@ -23,7 +22,6 @@ function App() {
   const [theme, setTheme] = useState(localStorage.getItem('mirrorRegistryTheme') || 'light');
   const [auth, setAuth] = useState<AnyRecord>({ loading: true, authenticated: false });
   const [status, setStatus] = useState<AnyRecord>({});
-  const [opsSummary, setOpsSummary] = useState<AnyRecord>({});
   const [mirrors, setMirrors] = useState<Mirror[]>([]);
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [syncQueue, setSyncQueue] = useState<SyncQueueTask[]>([]);
@@ -33,7 +31,6 @@ function App() {
   const [events, setEvents] = useState<AnyRecord[]>([]);
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
-  const [schedules, setSchedules] = useState<AnyRecord[]>([]);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
   const api = useMemo(() => createApiClient(), []);
@@ -72,12 +69,7 @@ function App() {
   }
 
   async function loadStatus() {
-    const [data, ops] = await Promise.all([
-      api('GET', '/status'),
-      api('GET', '/ops/summary'),
-    ]);
-    setStatus(data);
-    setOpsSummary(ops);
+    setStatus(await api('GET', '/status'));
   }
 
   async function loadMirrors() {
@@ -110,10 +102,6 @@ function App() {
     setCredentials(await api('GET', '/credentials'));
   }
 
-  async function loadSchedules() {
-    setSchedules(await api('GET', '/schedules'));
-  }
-
   useEffect(() => {
     loadAuth();
   }, []);
@@ -132,10 +120,6 @@ function App() {
         await loadCredentials();
       }
       if (view === 'credentials') await loadCredentials();
-      if (view === 'schedules') {
-        await loadSchedules();
-        await loadCredentials();
-      }
       if (view === 'storage') await loadStorage();
       if (view === 'logs') await loadLogs();
       if (view === 'settings') await loadSettings();
@@ -229,11 +213,10 @@ function App() {
           </header>
 
           <main>
-        {view === 'dashboard' && <Dashboard status={status} ops={opsSummary} api={api} notify={notify} reload={() => action('已刷新', loadStatus)} setView={setView} />}
+        {view === 'dashboard' && <Dashboard status={status} reload={() => action('已刷新', loadStatus)} setView={setView} />}
         {view === 'runs' && <Runs runs={runs} syncQueue={syncQueue} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
-        {view === 'schedules' && <Schedules schedules={schedules} credentials={credentials} api={api} reload={loadSchedules} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
         {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
           {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}

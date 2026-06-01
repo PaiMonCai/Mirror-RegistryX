@@ -1,4 +1,4 @@
-"""Tag protection, retention policy, and scheduled push routes."""
+"""Scheduled push routes kept as part of the personal-use sync workflow."""
 
 from . import legacy
 from .route_utils import legacy_router, path_in_prefixes
@@ -10,5 +10,5 @@ next_run_from_cron = legacy.next_run_from_cron
 
 router = legacy_router(
     "governance",
-    lambda path: path_in_prefixes(path, ["/api/tag-protection", "/api/retention-policies", "/api/schedules"]),
+    lambda path: path_in_prefixes(path, ["/api/schedules"]),
 )

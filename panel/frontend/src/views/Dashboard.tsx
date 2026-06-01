@@ -1,42 +1,30 @@
-import { useEffect, useState } from 'react';
-import {
-  AlertTriangle,
-  CheckCircle2,
-  RefreshCw,
-} from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Database, HardDrive, RefreshCw, Settings2 } from 'lucide-react';
 import { Badge, Metric, Panel } from '../components/common';
 import type { AnyRecord } from '../types';
-import { cx } from '../utils';
+import { cx, formatMB } from '../utils';
 
-export function Dashboard({ status, ops, api, notify, reload, setView }: { status: AnyRecord; ops: AnyRecord; api: any; notify: (message: string) => void; reload: () => void; setView: (view: any) => void }) {
-  const failures = ops.sync?.recent_failures || [];
-  const health = ops.health || 'ok';
+export function Dashboard({ status, reload, setView }: { status: AnyRecord; reload: () => void; setView: (view: any) => void }) {
+  const latestRun = status.latest_run;
+  const health = status.disk_low ? 'warn' : latestRun?.status === 'failed' ? 'error' : 'ok';
   const healthCopy: Record<string, { title: string; body: string }> = {
-    ok: { title: '镜像流水线运行正常', body: '定时检测、拉取和推送链路未发现阻断问题，可以继续维护镜像源与发布策略。' },
-    warn: { title: '流水线需要关注', body: '存在删除标记或待处理队列，建议在低峰期处理，避免影响后续定时推送。' },
-    error: { title: '同步链路需要处理', body: '最近的 Docker 镜像拉取、标记或推送出现异常，优先查看失败任务和诊断结果。' },
+    ok: { title: '本地镜像服务运行正常', body: '面板、同步队列和本地 Registry 已就绪。需要新增镜像时，直接从镜像配置开始。' },
+    warn: { title: '存储空间需要关注', body: '磁盘剩余空间偏低。建议先查看存储页，再决定是否清理旧 tag。' },
+    error: { title: '最近一次同步失败', body: '同步任务出现失败项。先打开任务页看错误，再按需重试或重新保存凭据。' },
   };
   const healthInfo = healthCopy[health] || healthCopy.ok;
-  const latestRun = ops.sync?.latest_run;
-  const reasonLabels: Record<string, string> = {
-    disk_low: '磁盘空间不足',
-    latest_run_failed: '最近同步失败',
-    sync_active: '同步正在运行',
-    pending_deletion_marks: '存在删除标记',
-  };
   const nextActions = [
-    failures.length > 0 && { label: '查看失败任务', view: 'runs', tone: 'danger' },
-    ops.storage?.deletion_marks > 0 && { label: '处理删除标记', view: 'storage', tone: 'warn' },
+    { label: '添加镜像', view: 'mirrors', tone: 'default' },
+    { label: '保存凭据', view: 'credentials', tone: 'default' },
+    { label: '查看任务', view: 'runs', tone: latestRun?.status === 'failed' ? 'danger' : 'default' },
     { label: '查看日志', view: 'logs', tone: 'default' },
-    { label: '维护镜像配置', view: 'mirrors', tone: 'default' },
   ].filter(Boolean) as Array<{ label: string; view: any; tone: string }>;
   const cards = [
     ['健康', <Badge value={health} />],
-    ['镜像', ops.config?.mirrors ?? status.total ?? 0],
-    ['待同步', ops.config?.pending ?? status.pending ?? 0],
-    ['失败', failures.length],
-    ['删除标记', ops.storage?.deletion_marks ?? 0],
-    ['版本', ops.version?.image_tag || status.image_tag || '-'],
+    ['镜像', status.total ?? 0],
+    ['已同步', status.synced ?? 0],
+    ['待同步', status.pending ?? 0],
+    ['同步状态', status.is_syncing ? '运行中' : '空闲'],
+    ['版本', status.image_tag || status.app_version || '-'],
   ];
   return (
     <section className="stack">
@@ -48,7 +36,9 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
               <h2>{healthInfo.title}</h2>
               <p>{healthInfo.body}</p>
               <div className="chip-list compact">
-                {(ops.reasons || []).length === 0 ? <span className="chip">无活跃告警</span> : (ops.reasons || []).map((reason: string) => <span className="chip" key={reason}>{reasonLabels[reason] || reason}</span>)}
+                <span className="chip">{status.is_syncing ? '同步中' : '空闲'}</span>
+                <span className="chip">间隔 {status.interval ?? '-'} 分钟</span>
+                <span className="chip">并发 {status.sync_concurrency ?? '-'}</span>
               </div>
             </div>
           </div>
@@ -64,34 +54,29 @@ export function Dashboard({ status, ops, api, notify, reload, setView }: { statu
       <div className="dashboard-grid">
         <Panel title="同步概况">
           <dl className="kv">
-            <dt>同步状态</dt><dd>{ops.sync?.running ? '运行中' : '空闲'}</dd>
-            <dt>最近任务</dt><dd>{latestRun ? `${latestRun.status} · updated ${latestRun.updated} · failed ${latestRun.failed}` : '-'}</dd>
-            <dt>待同步</dt><dd>{ops.config?.pending ?? status.pending ?? 0}</dd>
-            <dt>最近失败</dt><dd>{failures.length}</dd>
+            <dt>状态</dt><dd>{status.is_syncing ? '运行中' : '空闲'}</dd>
+            <dt>最近任务</dt><dd>{latestRun ? `${latestRun.status} · 更新 ${latestRun.updated ?? 0} · 失败 ${latestRun.failed ?? 0}` : '-'}</dd>
+            <dt>上次开始</dt><dd>{status.last_started_at || '-'}</dd>
+            <dt>下次计划</dt><dd>{status.next_run_at || '-'}</dd>
           </dl>
         </Panel>
-        <Panel title="平台与安全">
+        <Panel title="本机配置">
           <dl className="kv">
-            <dt>数据库</dt><dd>{ops.config?.database_backend || status.database_backend || '-'}</dd>
-            <dt>Registry</dt><dd>{ops.config?.registries ?? status.registries ?? 0}</dd>
-            <dt>镜像组</dt><dd>{ops.config?.mirror_groups ?? status.mirror_groups ?? 0}</dd>
-            <dt>认证状态</dt><dd>{ops.security?.auth_required ? '已启用' : '未启用'}</dd>
+            <dt><Database size={14} /> 数据库</dt><dd>{status.database_backend || '-'}</dd>
+            <dt><Settings2 size={14} /> 重试</dt><dd>{status.sync_retry_count ?? '-'}</dd>
+            <dt>Cookie</dt><dd>{status.session_cookie_secure ? 'HTTPS' : 'HTTP'}</dd>
+            <dt>认证</dt><dd>{status.auth_required ? '已启用' : '未启用'}</dd>
           </dl>
         </Panel>
         <Panel title="存储状态">
           <dl className="kv">
-            <dt>磁盘状态</dt><dd>{ops.storage?.disk_low ? '低空间' : '正常'}</dd>
-            <dt>剩余空间</dt><dd>{ops.storage?.disk_free_bytes || '-'}</dd>
-            <dt>删除标记</dt><dd>{ops.storage?.deletion_marks ?? 0}</dd>
+            <dt><HardDrive size={14} /> 磁盘状态</dt><dd>{status.disk_low ? '低空间' : '正常'}</dd>
+            <dt>剩余空间</dt><dd>{formatMB(status.disk_free_bytes)}</dd>
+            <dt>同步引擎</dt><dd>{status.sync_engine || 'skopeo'}</dd>
             <dt>下步入口</dt><dd><button onClick={() => setView('storage')}>打开存储管理</button></dd>
           </dl>
         </Panel>
       </div>
-      {failures.length > 0 && <Panel title="最近失败">
-        <table><thead><tr><th>镜像</th><th>阶段</th><th>原因</th><th>建议</th></tr></thead>
-          <tbody>{failures.map((item: AnyRecord) => <tr key={item.id}><td>{item.source}</td><td>{item.step || '-'}</td><td>{item.explanation?.reason || item.error}</td><td>{item.explanation?.suggestion || '-'}</td></tr>)}</tbody>
-        </table>
-      </Panel>}
     </section>
   );
 }

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .auth import WORKER_TOKEN, require_worker_token, require_write_token
+from .auth import require_write_token
 from .db import db_execute, db_one, db_rows
 from .schemas import WorkerClaimIn, WorkerCompleteIn, WorkerHeartbeatIn
 
@@ -410,24 +410,6 @@ def complete_worker_queue_task(body: WorkerCompleteIn) -> dict:
     return {"ok": True, "worker": worker, "queue": public_sync_queue_task(sync_queue_row(row["id"]))}
 
 
-def build_worker_guide() -> dict:
-    return {
-        "enabled": bool(WORKER_TOKEN),
-        "token_source": "WORKER_TOKEN",
-        "endpoints": {
-            "heartbeat": "POST /api/workers/heartbeat",
-            "claim": "POST /api/workers/claim",
-            "complete": "POST /api/workers/complete",
-        },
-        "headers": {"X-Worker-Token": "<redacted>"},
-        "notes": [
-            "远程 worker token 只允许 worker 心跳、领取任务和回写结果，不授予管理员面板权限。",
-            "默认单机 sync worker 仍可直接消费本地 sync_queue；远程 worker 为预留能力。",
-            "同一目标 tag 的复制仍应由 worker 执行端保留 target lock。",
-        ],
-    }
-
-
 @router.post("/sync", dependencies=[Depends(require_write_token)])
 def trigger_sync():
     task = write_trigger("manual")
@@ -469,30 +451,3 @@ def cancel_sync_queue_task(queue_id: int):
 @router.post("/sync-queue/{queue_id}/replay", dependencies=[Depends(require_write_token)])
 def replay_sync_queue(queue_id: int):
     return {"ok": True, "queue": replay_sync_queue_task(queue_id)}
-
-
-@router.get("/workers")
-def get_workers():
-    return list_worker_rows()
-
-
-@router.get("/workers/guide")
-def get_worker_guide():
-    return build_worker_guide()
-
-
-@router.post("/workers/heartbeat", dependencies=[Depends(require_worker_token)])
-def worker_heartbeat(body: WorkerHeartbeatIn):
-    worker = upsert_worker_heartbeat(body)
-    audit_log("heartbeat", "worker", worker["worker_id"], {"environment": worker["environment"], "labels": worker["labels"]}, actor=f"worker:{worker['worker_id']}")
-    return {"ok": True, "worker": worker}
-
-
-@router.post("/workers/claim", dependencies=[Depends(require_worker_token)])
-def worker_claim(body: WorkerClaimIn):
-    return claim_worker_queue_task(body)
-
-
-@router.post("/workers/complete", dependencies=[Depends(require_worker_token)])
-def worker_complete(body: WorkerCompleteIn):
-    return complete_worker_queue_task(body)

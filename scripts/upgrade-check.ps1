@@ -66,13 +66,6 @@ if ([string]::IsNullOrWhiteSpace($adminPassword)) {
     Add-Check $checks "admin_password" "ok" "ADMIN_PASSWORD is present without printing it"
 }
 
-$credentialKey = Read-DotEnvValue -Path $envPath -Name "CREDENTIALS_SECRET_KEY"
-if ([string]::IsNullOrWhiteSpace($credentialKey)) {
-    Add-Check $checks "credentials_secret" "warn" "CREDENTIALS_SECRET_KEY is missing" "Set it before storing registry credentials."
-} else {
-    Add-Check $checks "credentials_secret" "ok" "CREDENTIALS_SECRET_KEY is present without printing it"
-}
-
 $imageTag = Read-DotEnvValue -Path $envPath -Name "MIRROR_REGISTRY_IMAGE_TAG"
 if ([string]::IsNullOrWhiteSpace($imageTag)) {
     $imageTag = "latest"
@@ -101,7 +94,6 @@ $result = [ordered]@{
     summary = [ordered]@{ status = $status; ok = @($checks | Where-Object { $_.status -eq "ok" }).Count; warn = $warnCount; error = $errorCount }
     checks = $checks
     commands = [ordered]@{
-        backup = "powershell -ExecutionPolicy Bypass -File .\scripts\migration-report.ps1 -ReportPath .\migration-report.json"
         upgrade = "docker compose pull && docker compose up -d"
         rollback = "set MIRROR_REGISTRY_IMAGE_TAG=<previous-tag> && docker compose pull && docker compose up -d"
     }

@@ -95,9 +95,9 @@ docker compose run --rm --no-deps panel python -m panel.password_reset admin --c
 
 ## 仓库凭据
 
-面板「仓库凭据」页保存源仓库或目标 Registry 的用户名和 token/password。新版本不再要求额外主密钥才能保存新凭据，适合个人单机部署。
+面板「仓库凭据」页保存源仓库或目标 Registry 的用户名和 token/password。
 
-如果是旧版本保存过的加密凭据，同步日志可能提示旧凭据无法解密。处理方式很简单：打开「仓库凭据」，编辑对应 GHCR/Docker Hub 凭据，重新输入 token/password 并保存一次。保存后的新凭据会被 sync worker 正常读取。
+如果是旧版本保存过的凭据，同步日志提示无法读取时，打开「仓库凭据」，编辑对应 GHCR/Docker Hub 凭据，重新输入 token/password 并保存一次即可。
 
 ## 常用操作
 

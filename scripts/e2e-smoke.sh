@@ -24,8 +24,8 @@ Usage: scripts/e2e-smoke.sh [options]
 
 Linux/macOS E2E smoke for an already running deployment. It validates the panel
 API path by adding a temporary mirror when possible, running local preflight,
-checking queue/history/diagnostics/observability, then cleaning up the temp
-mirror. It does not trigger an actual sync unless --run-sync is set.
+checking queue/history, then cleaning up the temp mirror. It does not trigger
+an actual sync unless --run-sync is set.
 
 Options:
   --env-file PATH              dotenv file to read admin credentials from (default: .env)
@@ -285,17 +285,5 @@ else
   echo "Sync queue items=$queue_count, recent runs=$runs_count"
   ok "Queue/history APIs reachable"
 fi
-
-step "Checking diagnostics and observability"
-diagnostics="$(api_json POST '/diagnostics/run' '{}')"
-diag_error_count="$(printf '%s' "$diagnostics" | python3 -c 'import json,sys; print(sum(1 for c in json.load(sys.stdin).get("checks", []) if c.get("status") == "error"))')"
-observability="$(api_json GET '/observability/summary' '')"
-alerts="$(printf '%s' "$observability" | json_get active_alerts)"
-echo "Diagnostics errors=$diag_error_count, active alerts=${alerts:-0}"
-if [[ "$diag_error_count" -gt 0 ]]; then
-  echo "Diagnostics reported errors during E2E smoke." >&2
-  exit 1
-fi
-ok "Diagnostics/observability passed"
 
 printf '\nE2E smoke passed.\n'

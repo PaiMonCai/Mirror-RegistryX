@@ -1,4 +1,4 @@
-"""Credential, registry, and mirror group API routes."""
+"""Registry credential API routes."""
 
 from . import legacy
 from .route_utils import legacy_router, path_in_prefixes
@@ -15,5 +15,5 @@ credential_allows = legacy.credential_allows
 
 router = legacy_router(
     "credentials",
-    lambda path: path_in_prefixes(path, ["/api/credentials", "/api/registries", "/api/mirror-groups"]),
+    lambda path: path_in_prefixes(path, ["/api/credentials"]),
 )

@@ -4,13 +4,11 @@ import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from .db import db_execute, db_one, db_rows
 from .errors import api_error_response
-from .schemas import AccessUserIn, LoginIn, PasswordChangeIn, PasswordResetIn
+from .schemas import LoginIn, PasswordChangeIn
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -21,9 +19,9 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
 
 
-WORKER_TOKEN = os.getenv("WORKER_TOKEN", "").strip()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+WORKER_TOKEN = os.getenv("WORKER_TOKEN", "").strip()
 SESSION_TTL_SECONDS = env_int("SESSION_TTL_SECONDS", 604800, 300, 60 * 60 * 24 * 30)
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "mirror_registry_session")
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
@@ -117,10 +115,6 @@ def public_user(row: dict) -> dict:
     }
 
 
-def list_access_users() -> list[dict]:
-    return [public_user(row) for row in db_rows("SELECT username, role, created_at, updated_at FROM users ORDER BY username")]
-
-
 def change_own_password(username: str, body: PasswordChangeIn) -> None:
     row = user_row(username)
     if not row:
@@ -132,55 +126,6 @@ def change_own_password(username: str, body: PasswordChangeIn) -> None:
     db_execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?", (password_hash(body.new_password), now, username))
     db_execute("DELETE FROM sessions WHERE username = ?", (username,))
     audit_log("password_change", "user", username, {"mode": "self"}, actor=username)
-
-
-def reset_user_password(username: str, body: PasswordResetIn, actor: str = "panel") -> dict:
-    clean_username = username.strip()
-    row = user_row(clean_username)
-    if not row:
-        raise HTTPException(404, "用户不存在")
-    now = now_iso()
-    db_execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?", (password_hash(body.new_password), now, clean_username))
-    db_execute("DELETE FROM sessions WHERE username = ?", (clean_username,))
-    audit_log("password_reset", "user", clean_username, {"mode": "admin"}, actor=actor)
-    return public_user(user_row(clean_username))
-
-
-def upsert_access_user(body: AccessUserIn) -> dict:
-    username = body.username.strip()
-    role = normalize_role(body.role)
-    existing = user_row(username)
-    now = now_iso()
-    if existing:
-        if body.password:
-            db_execute("UPDATE users SET password_hash = ?, role = ?, updated_at = ? WHERE username = ?", (password_hash(body.password), role, now, username))
-        else:
-            db_execute("UPDATE users SET role = ?, updated_at = ? WHERE username = ?", (role, now, username))
-        audit_log("update", "user", username, {"role": role}, actor="panel")
-    else:
-        if not body.password:
-            raise HTTPException(400, "创建用户必须提供 password")
-        db_execute(
-            "INSERT INTO users(username, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (username, password_hash(body.password), role, now, now),
-        )
-        audit_log("create", "user", username, {"role": role}, actor="panel")
-    return public_user(user_row(username))
-
-
-def delete_access_user(username: str) -> None:
-    clean_username = username.strip()
-    if clean_username == ADMIN_USERNAME:
-        raise HTTPException(400, "不能删除环境变量初始化的默认管理员")
-    if not user_row(clean_username):
-        raise HTTPException(404, "用户不存在")
-    db_execute("DELETE FROM users WHERE username = ?", (clean_username,))
-    db_execute("DELETE FROM sessions WHERE username = ?", (clean_username,))
-    audit_log("delete", "user", clean_username, {}, actor="panel")
-
-
-def worker_token_valid(token: str | None) -> bool:
-    return bool(WORKER_TOKEN and token and hmac.compare_digest(token, WORKER_TOKEN))
 
 
 def session_hash(token: str) -> str:
@@ -228,8 +173,6 @@ def delete_session(token: str | None) -> None:
 
 
 def authenticate_request(request: Request) -> dict | None:
-    if request.url.path.startswith("/api/workers/") and worker_token_valid(request.headers.get("x-worker-token")):
-        return {"username": "worker", "role": "worker", "auth_method": "worker"}
     return session_user(request.cookies.get(SESSION_COOKIE_NAME))
 
 
@@ -255,13 +198,6 @@ def require_admin(request: Request) -> None:
     if user and role_allows(user.get("role", ""), "admin"):
         return
     raise HTTPException(403, "该操作需要 admin 权限")
-
-
-def require_worker_token(request: Request, x_worker_token: Annotated[str | None, Header(alias="X-Worker-Token")] = None) -> None:
-    if worker_token_valid(x_worker_token):
-        request.state.auth_user = {"username": "worker", "role": "worker", "auth_method": "worker"}
-        return
-    raise HTTPException(401, "worker 操作需要有效 WORKER_TOKEN")
 
 
 @router.post("/auth/login")
@@ -313,26 +249,4 @@ def logout(request: Request, response: Response):
     delete_session(request.cookies.get(SESSION_COOKIE_NAME))
     response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="lax")
     audit_log("logout", "auth", user.get("username", "unknown"), {"method": user.get("auth_method", "unknown")}, actor=user.get("username", "unknown"))
-    return {"ok": True}
-
-
-@router.get("/access/users", dependencies=[Depends(require_admin)])
-def get_access_users():
-    return list_access_users()
-
-
-@router.post("/access/users", dependencies=[Depends(require_admin)])
-def save_access_user(body: AccessUserIn):
-    return {"ok": True, "user": upsert_access_user(body)}
-
-
-@router.post("/access/users/{username}/reset-password", dependencies=[Depends(require_admin)])
-def reset_access_user_password(username: str, body: PasswordResetIn, request: Request):
-    actor = getattr(request.state, "auth_user", {}).get("username", "panel")
-    return {"ok": True, "user": reset_user_password(username, body, actor=actor)}
-
-
-@router.delete("/access/users/{username}", dependencies=[Depends(require_admin)])
-def remove_access_user(username: str):
-    delete_access_user(username)
     return {"ok": True}

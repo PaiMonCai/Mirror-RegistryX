@@ -39,7 +39,7 @@ export function LoginScreen({ auth, login, theme, setTheme }: LoginScreenProps) 
         </div>
         <div>
           <h1>Mirror Registry</h1>
-          <p>登录后管理镜像同步、仓库凭据、治理策略和存储统计。</p>
+          <p>登录后管理镜像、仓库凭据、同步任务、存储和日志。</p>
         </div>
         <form className="login-form" onSubmit={submit}>
           <label>

@@ -75,6 +75,7 @@ def require_paths() -> None:
         "InstallUpgrade.tsx",
         "Observability.tsx",
         "Platform.tsx",
+        "Schedules.tsx",
         "Security.tsx",
         "Workers.tsx",
     ]
@@ -149,7 +150,6 @@ def require_frontend_core_only() -> None:
         "dashboard",
         "mirrors",
         "credentials",
-        "schedules",
         "storage",
         "runs",
         "logs",
@@ -160,7 +160,6 @@ def require_frontend_core_only() -> None:
         "/status",
         "/mirrors",
         "/credentials",
-        "/schedules",
         "/storage",
         "/sync-runs",
         "/sync-queue",
@@ -179,6 +178,7 @@ def require_frontend_core_only() -> None:
         "install-upgrade",
         "audit-logs",
         "access/users",
+        "/schedules",
         "security-guide",
         "diagnostics/run",
     ]:
@@ -187,6 +187,56 @@ def require_frontend_core_only() -> None:
     if '<div id="root"></div>' not in read("panel/static/index.html"):
         fail("Vite build output is not present in panel/static/index.html")
     ok("frontend exposes only core personal-use pages")
+
+
+def require_backend_core_only() -> None:
+    app_source = read("panel/app.py")
+    auth_source = read("panel/auth.py")
+    queue_source = read("panel/queue.py")
+    ops_source = read("panel/ops.py")
+    credentials_source = read("panel/credentials.py")
+    test_source = read("tests/test_panel.py")
+
+    for snippet in [
+        "_backup_migration",
+        "_install_upgrade",
+        "_observability",
+        "_audit",
+        "_governance",
+    ]:
+        if snippet in app_source:
+            fail(f"panel/app.py still mounts non-core router {snippet!r}")
+
+    for snippet in [
+        '"/access/users"',
+        '"/workers"',
+        '"/workers/guide"',
+        '"/workers/heartbeat"',
+        '"/workers/claim"',
+        '"/workers/complete"',
+    ]:
+        if snippet in auth_source or snippet in queue_source:
+            fail(f"auth/queue still exposes non-core route {snippet!r}")
+
+    for snippet in [
+        "/api/ops",
+        "/api/diagnostics",
+        "/api/security-guide",
+        "/api/security-checks",
+        "/api/platform",
+        "/api/deployment-modes",
+        "/api/database-guide",
+    ]:
+        if snippet in ops_source:
+            fail(f"ops router still exposes non-core path {snippet!r}")
+
+    for snippet in ["/api/registries", "/api/mirror-groups"]:
+        if snippet in credentials_source:
+            fail(f"credentials router still exposes non-core path {snippet!r}")
+
+    if "test_non_core_api_routes_are_not_exposed" not in test_source:
+        fail("tests must verify hidden non-core API routes are not exposed")
+    ok("backend API exposes only the personal-use core surface")
 
 
 def require_smoke_is_core_only() -> None:
@@ -256,6 +306,7 @@ def main() -> None:
     require_compose_shape()
     require_credentials_are_personal_use_friendly()
     require_frontend_core_only()
+    require_backend_core_only()
     require_smoke_is_core_only()
     require_docs_and_env_are_core_only()
     require_check_runtime()

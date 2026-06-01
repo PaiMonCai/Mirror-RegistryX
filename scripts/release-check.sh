@@ -58,7 +58,7 @@ else
 fi
 
 step "required release files"
-for path in CHANGELOG.md RELEASE.md docs/rollback.md docs/backup-restore.md scripts/release-check.sh scripts/prod-smoke.sh scripts/e2e-smoke.sh; do
+for path in CHANGELOG.md RELEASE.md scripts/release-check.sh scripts/prod-smoke.sh scripts/e2e-smoke.sh; do
   [[ -s "$path" ]] || fail "required release file is missing or empty: $path"
   ok "$path"
 done

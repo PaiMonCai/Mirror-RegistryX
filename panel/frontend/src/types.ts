@@ -47,24 +47,11 @@ export interface SyncQueueTask {
   finished_at?: string;
 }
 
-export interface WorkerStatus {
-  worker_id: string;
-  name?: string;
-  environment?: string;
-  status: string;
-  labels?: string[];
-  capabilities?: string[];
-  last_heartbeat?: string;
-  latest_claim?: AnyRecord;
-  message?: string;
-}
-
 export type View =
   | 'dashboard'
   | 'runs'
   | 'mirrors'
   | 'credentials'
-  | 'schedules'
   | 'storage'
   | 'logs'
   | 'settings';
