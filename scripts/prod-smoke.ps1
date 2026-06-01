@@ -6,7 +6,6 @@ param(
     [string]$RegistryUrl = "http://localhost:5000",
     [string]$AdminUsername = "",
     [string]$AdminPassword = "",
-    [string]$PanelToken = "",
     [switch]$StartServices,
     [switch]$AllowInsecureLocal,
     [switch]$SkipSync,
@@ -232,17 +231,6 @@ function Invoke-PanelJson {
     }
 }
 
-function Get-BearerHeaders {
-    $token = $PanelToken
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        $token = Get-ConfigValue -Name "PANEL_TOKEN"
-    }
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        return @{}
-    }
-    return @{ Authorization = "Bearer $token" }
-}
-
 function Get-EffectiveAdminUsername {
     if (-not [string]::IsNullOrWhiteSpace($AdminUsername)) {
         return $AdminUsername
@@ -258,8 +246,8 @@ function Get-EffectiveAdminPassword {
 }
 
 function Get-MaxRunId {
-    param([hashtable]$Headers)
-    $runs = @(Invoke-PanelJson -Method "GET" -Path "/sync-runs?limit=50" -Headers $Headers)
+    param([Microsoft.PowerShell.Commands.WebRequestSession]$WebSession)
+    $runs = @(Invoke-PanelJson -Method "GET" -Path "/sync-runs?limit=50" -WebSession $WebSession)
     $max = 0
     foreach ($run in $runs) {
         if ($null -ne $run.id -and [int]$run.id -gt $max) {
@@ -272,12 +260,12 @@ function Get-MaxRunId {
 function Wait-SyncRun {
     param(
         [int]$AfterId,
-        [hashtable]$Headers,
+        [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
         [int]$TimeoutSeconds
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $runs = @(Invoke-PanelJson -Method "GET" -Path "/sync-runs?limit=50" -Headers $Headers)
+        $runs = @(Invoke-PanelJson -Method "GET" -Path "/sync-runs?limit=50" -WebSession $WebSession)
         $candidate = $runs |
             Where-Object { $null -ne $_.id -and [int]$_.id -gt $AfterId } |
             Sort-Object -Property id -Descending |
@@ -315,11 +303,6 @@ function Wait-BusyboxTag {
 function Test-EnvironmentSecurity {
     Write-Step "Checking production environment settings"
     $script:EnvValues = Read-DotEnv -Path $EnvFile
-
-    $panelTokenValue = Get-ConfigValue -Name "PANEL_TOKEN"
-    if (Test-PlaceholderValue -Value $panelTokenValue -Placeholders @("change-me", "changeme", "test-token", "replace-with-a-long-random-token")) {
-        Add-SecurityIssue "PANEL_TOKEN is empty, default, or a placeholder."
-    }
 
     $adminPasswordValue = Get-EffectiveAdminPassword
     if (Test-PlaceholderValue -Value $adminPasswordValue -Placeholders @("change-me", "changeme", "password", "admin", "admin-password", "replace-with-a-strong-admin-password")) {
@@ -392,14 +375,7 @@ function Test-PanelApis {
         $sessionStatus = Invoke-PanelJson -Method "GET" -Path "/status" -WebSession $script:PanelSession
         Write-Host "Session status: total mirrors=$($sessionStatus.total), synced=$($sessionStatus.synced)"
 
-        $headers = Get-BearerHeaders
-        if ($headers.Count -eq 0) {
-            throw "PANEL_TOKEN is required for automation compatibility smoke."
-        }
-        $bearerStatus = Invoke-PanelJson -Method "GET" -Path "/status" -Headers $headers
-        Write-Host "Bearer status: auth_mode=$($bearerStatus.auth_mode), app_version=$($bearerStatus.app_version)"
-
-        $diagnostics = Invoke-PanelJson -Method "POST" -Path "/diagnostics/run" -Headers $headers -Body @{}
+        $diagnostics = Invoke-PanelJson -Method "POST" -Path "/diagnostics/run" -WebSession $script:PanelSession -Body @{}
         $diagnosticErrors = @()
         foreach ($check in @($diagnostics.checks)) {
             if ($check.status -eq "error") {
@@ -412,7 +388,7 @@ function Test-PanelApis {
             throw "Diagnostic errors: $($diagnosticErrors -join '; ')"
         }
 
-        $verify = Invoke-PanelJson -Method "POST" -Path "/backup-restore/verify" -Headers $headers -Body @{ require_credentials_secret = $true }
+        $verify = Invoke-PanelJson -Method "POST" -Path "/backup-restore/verify" -WebSession $script:PanelSession -Body @{ require_credentials_secret = $true }
         if (-not $verify.ok) {
             $failed = @($verify.checks | Where-Object { -not $_.ok } | ForEach-Object { $_.name }) -join ", "
             throw "Backup restore readiness failed: $failed"
@@ -431,12 +407,11 @@ function Test-SyncSmoke {
             return
         }
 
-        $headers = Get-BearerHeaders
-        if ($headers.Count -eq 0) {
-            throw "PANEL_TOKEN is required to trigger sync."
+        if ($null -eq $script:PanelSession) {
+            throw "Panel session is required to trigger sync."
         }
 
-        $mirrors = @(Invoke-PanelJson -Method "GET" -Path "/mirrors" -Headers $headers)
+        $mirrors = @(Invoke-PanelJson -Method "GET" -Path "/mirrors" -WebSession $script:PanelSession)
         if ($mirrors.Count -eq 0) {
             throw "No mirrors are configured."
         }
@@ -447,9 +422,9 @@ function Test-SyncSmoke {
             Add-WarningMessage "Default busybox mirror is not configured; sync smoke will validate the current mirror set only."
         }
 
-        $beforeRunId = Get-MaxRunId -Headers $headers
-        Invoke-PanelJson -Method "POST" -Path "/sync" -Headers $headers -Body @{} | Out-Null
-        $run = Wait-SyncRun -AfterId $beforeRunId -Headers $headers -TimeoutSeconds $SyncTimeoutSeconds
+        $beforeRunId = Get-MaxRunId -WebSession $script:PanelSession
+        Invoke-PanelJson -Method "POST" -Path "/sync" -WebSession $script:PanelSession -Body @{} | Out-Null
+        $run = Wait-SyncRun -AfterId $beforeRunId -WebSession $script:PanelSession -TimeoutSeconds $SyncTimeoutSeconds
         Write-Host "Sync run $($run.id) finished with status=$($run.status), failed=$($run.failed)"
         if ($run.status -ne "completed" -or [int]$run.failed -gt 0) {
             throw "Sync smoke failed. Run id=$($run.id), status=$($run.status), failed=$($run.failed), message=$($run.message)"

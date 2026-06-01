@@ -10,7 +10,6 @@ PANEL_URL="http://localhost:8080"
 REGISTRY_URL="http://localhost:5000"
 ADMIN_USERNAME=""
 ADMIN_PASSWORD=""
-PANEL_TOKEN_VALUE=""
 START_SERVICES=0
 ALLOW_INSECURE_LOCAL=0
 SKIP_SYNC=0
@@ -37,7 +36,6 @@ Options:
   --registry-url URL              registry base URL (default: http://localhost:5000)
   --admin-username USER           login username override
   --admin-password PASSWORD       login password override
-  --panel-token TOKEN             Bearer token override
   --start-services                docker compose pull && up -d before probing
   --allow-insecure-local          downgrade production safety failures to warnings
   --skip-sync                     skip sync trigger even with --start-services
@@ -55,7 +53,6 @@ while [[ $# -gt 0 ]]; do
     --registry-url) REGISTRY_URL="$2"; shift 2 ;;
     --admin-username) ADMIN_USERNAME="$2"; shift 2 ;;
     --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
-    --panel-token) PANEL_TOKEN_VALUE="$2"; shift 2 ;;
     --start-services) START_SERVICES=1; shift ;;
     --allow-insecure-local) ALLOW_INSECURE_LOCAL=1; shift ;;
     --skip-sync) SKIP_SYNC=1; shift ;;
@@ -185,33 +182,28 @@ else:
 }
 
 api_json() {
-  local method="$1" path="$2" body="${3:-}" auth_mode="${4:-bearer}"
-  local url headers=()
+  local method="$1" path="$2" body="${3:-}"
+  local url
   url="$(join_url "$PANEL_URL" "api${path}")"
-  if [[ "$auth_mode" == "bearer" ]]; then
-    local token="$PANEL_TOKEN_VALUE"
-    [[ -n "$token" ]] || token="$(config_value PANEL_TOKEN)"
-    [[ -n "$token" ]] && headers=(-H "Authorization: Bearer $token")
-  fi
   if [[ -n "$body" ]]; then
     curl -k -sS --fail-with-body --max-time 30 -X "$method" "$url" \
-      -H 'Content-Type: application/json' "${headers[@]}" \
+      -H 'Content-Type: application/json' \
       -b "$COOKIE_JAR" -c "$COOKIE_JAR" --data "$body"
   else
     curl -k -sS --fail-with-body --max-time 30 -X "$method" "$url" \
-      "${headers[@]}" -b "$COOKIE_JAR" -c "$COOKIE_JAR"
+      -b "$COOKIE_JAR" -c "$COOKIE_JAR"
   fi
 }
 
 max_run_id() {
-  api_json GET '/sync-runs?limit=50' '' bearer | python3 -c 'import json,sys; print(max([0]+[int(x.get("id") or 0) for x in json.load(sys.stdin)]))'
+  api_json GET '/sync-runs?limit=50' | python3 -c 'import json,sys; print(max([0]+[int(x.get("id") or 0) for x in json.load(sys.stdin)]))'
 }
 
 wait_sync_run() {
   local after_id="$1" timeout="$2" deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     local runs candidate
-    runs="$(api_json GET '/sync-runs?limit=50' '' bearer)"
+    runs="$(api_json GET '/sync-runs?limit=50')"
     candidate="$(printf '%s' "$runs" | python3 -c 'import json, sys
 after = int(sys.argv[1])
 runs = json.load(sys.stdin)
@@ -258,10 +250,6 @@ step "Checking production environment settings"
 if [[ ! -f "$ENV_FILE" ]]; then
   security_issue "Environment file not found: $ENV_FILE"
 fi
-panel_token="${PANEL_TOKEN_VALUE:-$(config_value PANEL_TOKEN)}"
-if placeholder_value "$panel_token" change-me changeme test-token replace-with-a-long-random-token; then
-  security_issue "PANEL_TOKEN is empty, default, or a placeholder."
-fi
 admin_user="${ADMIN_USERNAME:-$(config_value ADMIN_USERNAME admin)}"
 admin_pass="${ADMIN_PASSWORD:-$(config_value ADMIN_PASSWORD)}"
 if placeholder_value "$admin_pass" change-me changeme password admin admin-password replace-with-a-strong-admin-password; then
@@ -307,22 +295,15 @@ finish_failures
 step "Checking panel login and protected APIs"
 # shellcheck disable=SC2097,SC2098
 login_body="$(SMOKE_ADMIN_USER="$admin_user" SMOKE_ADMIN_PASS="$admin_pass" python3 -c 'import json, os; print(json.dumps({"username": os.environ["SMOKE_ADMIN_USER"], "password": os.environ["SMOKE_ADMIN_PASS"]}))')"
-login="$(api_json POST '/auth/login' "$login_body" session)" || fail "Login API failed."
+login="$(api_json POST '/auth/login' "$login_body")" || fail "Login API failed."
 if [[ ${#failures[@]} -eq 0 && "$(printf '%s' "$login" | json_get ok)" != "true" ]]; then
   fail "Login response did not report ok=true."
 fi
-session_status="$(api_json GET '/status' '' session)" || fail "Session status API failed."
+session_status="$(api_json GET '/status')" || fail "Session status API failed."
 if [[ ${#failures[@]} -eq 0 ]]; then
   echo "Session status: total mirrors=$(printf '%s' "$session_status" | json_get total), synced=$(printf '%s' "$session_status" | json_get synced)"
 fi
-if [[ -z "$panel_token" ]]; then
-  fail "PANEL_TOKEN is required for automation compatibility smoke."
-fi
-bearer_status="$(api_json GET '/status' '' bearer)" || fail "Bearer status API failed."
-if [[ ${#failures[@]} -eq 0 ]]; then
-  echo "Bearer status: auth_mode=$(printf '%s' "$bearer_status" | json_get auth_mode), app_version=$(printf '%s' "$bearer_status" | json_get app_version)"
-fi
-diagnostics="$(api_json POST '/diagnostics/run' '{}' bearer)" || fail "Diagnostics API failed."
+diagnostics="$(api_json POST '/diagnostics/run' '{}')" || fail "Diagnostics API failed."
 if [[ ${#failures[@]} -eq 0 ]]; then
   diag_errors="$(printf '%s' "$diagnostics" | python3 -c 'import json, sys
 data=json.load(sys.stdin)
@@ -333,7 +314,7 @@ print("\n".join("Diagnostic warning: {}: {}".format(c.get("name"), c.get("messag
   [[ -n "$diag_warnings" ]] && while IFS= read -r line; do warn "$line"; done <<< "$diag_warnings"
   [[ -n "$diag_errors" ]] && fail "Diagnostic errors: $diag_errors"
 fi
-verify="$(api_json POST '/backup-restore/verify' '{"require_credentials_secret":true}' bearer)" || fail "Backup restore readiness API failed."
+verify="$(api_json POST '/backup-restore/verify' '{"require_credentials_secret":true}')" || fail "Backup restore readiness API failed."
 if [[ ${#failures[@]} -eq 0 && "$(printf '%s' "$verify" | json_get ok)" != "true" ]]; then
   failed_checks="$(printf '%s' "$verify" | python3 -c 'import json, sys
 data=json.load(sys.stdin)
@@ -349,7 +330,7 @@ if [[ "$START_SERVICES" != "1" ]]; then
 elif [[ "$SKIP_SYNC" == "1" ]]; then
   warn "Skipping sync trigger because --skip-sync was set."
 else
-  mirrors="$(api_json GET '/mirrors' '' bearer)" || fail "Mirrors API failed."
+  mirrors="$(api_json GET '/mirrors')" || fail "Mirrors API failed."
   mirror_count="$(printf '%s' "$mirrors" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
   [[ "$mirror_count" == "0" ]] && fail "No mirrors are configured."
   has_busybox="$(printf '%s' "$mirrors" | python3 -c 'import json, sys
@@ -358,7 +339,7 @@ print("1" if any(m.get("source") == "docker.io/library/busybox:latest" and "libr
 
   [[ "$has_busybox" == "0" ]] && warn "Default busybox mirror is not configured; sync smoke will validate the current mirror set only."
   before_run_id="$(max_run_id)"
-  api_json POST '/sync' '{}' bearer >/dev/null || fail "Sync trigger API failed."
+  api_json POST '/sync' '{}' >/dev/null || fail "Sync trigger API failed."
   if [[ ${#failures[@]} -eq 0 ]]; then
     run="$(wait_sync_run "$before_run_id" "$SYNC_TIMEOUT_SECONDS")" || fail "Sync run did not finish."
     if [[ ${#failures[@]} -eq 0 ]]; then

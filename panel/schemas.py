@@ -12,13 +12,6 @@ class AccessUserIn(BaseModel):
     role: str = Field(default="viewer", max_length=32)
 
 
-class ApiTokenIn(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    role: str = Field(default="operator", max_length=32)
-    scopes: list[str] = Field(default_factory=list, max_length=32)
-    expires_at: str | None = Field(default=None, max_length=64)
-
-
 class MirrorIn(BaseModel):
     source: str = Field(min_length=1, max_length=255)
     target: str = Field(min_length=1, max_length=255)

@@ -2,7 +2,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
@@ -11,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from .db import db_execute, db_one, db_rows
 from .errors import api_error_response
-from .schemas import AccessUserIn, ApiTokenIn, LoginIn
+from .schemas import AccessUserIn, LoginIn
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -22,7 +21,6 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
 
 
-PANEL_TOKEN = os.getenv("PANEL_TOKEN", "change-me")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN", "").strip()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
@@ -38,36 +36,6 @@ router = APIRouter(prefix="/api")
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def parse_iso(value: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.min.replace(tzinfo=timezone.utc)
-
-
-def validate_slug(value: str, field_name: str) -> str:
-    slug = value.strip()
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", slug):
-        raise HTTPException(400, f"{field_name} 只能包含字母、数字、点、下划线和短横线")
-    return slug
-
-
-def clean_worker_list(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))[:32]
-
-
-def parse_worker_list(value: str | None) -> list[str]:
-    if not value:
-        return []
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(decoded, list):
-        return []
-    return clean_worker_list([str(item) for item in decoded])
 
 
 def audit_log(action: str, resource_type: str, resource_id: str, detail: dict | None = None, actor: str = "panel") -> None:
@@ -98,7 +66,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
-ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2, "automation": 2}
+ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2}
 
 
 def normalize_role(value: str) -> str:
@@ -186,114 +154,6 @@ def delete_access_user(username: str) -> None:
     audit_log("delete", "user", clean_username, {}, actor="panel")
 
 
-def bearer_token_valid(authorization: str | None) -> bool:
-    expected = f"Bearer {PANEL_TOKEN}"
-    return bool(PANEL_TOKEN and authorization and hmac.compare_digest(authorization, expected))
-
-
-SCOPE_PATH_PREFIXES = {
-    "sync": ("/api/sync", "/api/sync-queue", "/api/sync-runs", "/api/sync-run-items", "/api/mirrors/preflight"),
-    "mirrors": ("/api/mirrors", "/api/settings", "/api/platform", "/api/registries", "/api/mirror-groups"),
-    "credentials": ("/api/credentials",),
-    "storage": ("/api/storage", "/api/retention-policies", "/api/tag-protection"),
-    "ops": ("/api/diagnostics", "/api/backup-restore", "/api/migration", "/api/install-upgrade"),
-    "admin": ("/api/access",),
-}
-
-
-def required_scope_for_path(path: str) -> str:
-    for scope, prefixes in SCOPE_PATH_PREFIXES.items():
-        if any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes):
-            return scope
-    return "write"
-
-
-def token_scopes_allow(user: dict, path: str) -> bool:
-    if user.get("auth_method") != "api_token":
-        return True
-    scopes = set(user.get("scopes") or [])
-    if not scopes or "*" in scopes:
-        return True
-    required = required_scope_for_path(path)
-    return required in scopes or (required == "write" and "write" in scopes)
-
-
-def hash_api_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def api_token_user(authorization: str | None) -> dict | None:
-    if not authorization or not authorization.startswith("Bearer mrt_"):
-        return None
-    token = authorization.removeprefix("Bearer ").strip()
-    token_hash = hash_api_token(token)
-    row = db_one(
-        """
-        SELECT id, name, role, scopes, expires_at, revoked
-        FROM api_tokens
-        WHERE token_hash = ?
-        """,
-        (token_hash,),
-    )
-    if not row or int(row.get("revoked") or 0):
-        return None
-    expires_at = row.get("expires_at") or ""
-    if expires_at and parse_iso(expires_at) <= datetime.now(timezone.utc):
-        return None
-    db_execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
-    return {
-        "username": f"token:{row['name']}",
-        "role": row["role"],
-        "auth_method": "api_token",
-        "token_id": row["id"],
-        "scopes": parse_worker_list(row.get("scopes")),
-    }
-
-
-def public_api_token(row: dict) -> dict:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "role": row["role"],
-        "scopes": parse_worker_list(row.get("scopes")),
-        "expires_at": row.get("expires_at") or "",
-        "revoked": bool(row.get("revoked")),
-        "created_at": row["created_at"],
-        "last_used_at": row.get("last_used_at") or "",
-    }
-
-
-def list_api_tokens() -> list[dict]:
-    rows = db_rows("SELECT id, name, role, scopes, expires_at, revoked, created_at, last_used_at FROM api_tokens ORDER BY created_at DESC")
-    return [public_api_token(row) for row in rows]
-
-
-def create_api_token(body: ApiTokenIn) -> dict:
-    role = normalize_role(body.role)
-    token_id = secrets.token_hex(8)
-    token = f"mrt_{secrets.token_urlsafe(32)}"
-    now = now_iso()
-    db_execute(
-        """
-        INSERT INTO api_tokens(id, name, token_hash, role, scopes, expires_at, revoked, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-        """,
-        (token_id, body.name.strip(), hash_api_token(token), role, json.dumps(clean_worker_list(body.scopes), ensure_ascii=False), body.expires_at or None, now),
-    )
-    audit_log("create", "api_token", token_id, {"name": body.name, "role": role, "scopes": body.scopes}, actor="panel")
-    return {"token": token, "api_token": public_api_token(db_one("SELECT id, name, role, scopes, expires_at, revoked, created_at, last_used_at FROM api_tokens WHERE id = ?", (token_id,)))}
-
-
-def revoke_api_token(token_id: str) -> dict:
-    clean_id = validate_slug(token_id, "token_id")
-    row = db_one("SELECT id FROM api_tokens WHERE id = ?", (clean_id,))
-    if not row:
-        raise HTTPException(404, "API token 不存在")
-    db_execute("UPDATE api_tokens SET revoked = 1 WHERE id = ?", (clean_id,))
-    audit_log("revoke", "api_token", clean_id, {}, actor="panel")
-    return public_api_token(db_one("SELECT id, name, role, scopes, expires_at, revoked, created_at, last_used_at FROM api_tokens WHERE id = ?", (clean_id,)))
-
-
 def worker_token_valid(token: str | None) -> bool:
     return bool(WORKER_TOKEN and token and hmac.compare_digest(token, WORKER_TOKEN))
 
@@ -343,14 +203,6 @@ def delete_session(token: str | None) -> None:
 
 
 def authenticate_request(request: Request) -> dict | None:
-    authorization = request.headers.get("authorization")
-    if authorization and authorization.startswith("Bearer mrt_"):
-        return api_token_user(authorization)
-    api_user = api_token_user(authorization)
-    if api_user:
-        return api_user
-    if bearer_token_valid(authorization):
-        return {"username": "panel_token", "role": "automation", "auth_method": "bearer"}
     if request.url.path.startswith("/api/workers/") and worker_token_valid(request.headers.get("x-worker-token")):
         return {"username": "worker", "role": "worker", "auth_method": "worker"}
     return session_user(request.cookies.get(SESSION_COOKIE_NAME))
@@ -366,14 +218,9 @@ async def require_api_auth(request: Request, call_next):
     return await call_next(request)
 
 
-def require_write_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
+def require_write_token(request: Request) -> None:
     user = getattr(request.state, "auth_user", None)
     if user and role_allows(user.get("role", ""), "operator"):
-        if token_scopes_allow(user, request.url.path):
-            return
-        raise HTTPException(403, f"API token 缺少 {required_scope_for_path(request.url.path)} scope")
-    if bearer_token_valid(authorization):
-        request.state.auth_user = {"username": "panel_token", "role": "automation", "auth_method": "bearer"}
         return
     raise HTTPException(403, "写操作需要 operator 或 admin 权限")
 
@@ -423,7 +270,6 @@ def auth_me(request: Request):
         "user": user,
         "admin_initialized": admin_user_exists(),
         "auth_required": True,
-        "using_default_token": PANEL_TOKEN == "change-me",
     }
 
 
@@ -450,18 +296,3 @@ def save_access_user(body: AccessUserIn):
 def remove_access_user(username: str):
     delete_access_user(username)
     return {"ok": True}
-
-
-@router.get("/access/tokens", dependencies=[Depends(require_admin)])
-def get_api_tokens():
-    return list_api_tokens()
-
-
-@router.post("/access/tokens", dependencies=[Depends(require_admin)])
-def issue_api_token(body: ApiTokenIn):
-    return {"ok": True, **create_api_token(body)}
-
-
-@router.post("/access/tokens/{token_id}/revoke", dependencies=[Depends(require_admin)])
-def revoke_access_token(token_id: str):
-    return {"ok": True, "api_token": revoke_api_token(token_id)}

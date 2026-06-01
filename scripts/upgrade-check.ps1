@@ -59,13 +59,6 @@ $checks = [System.Collections.Generic.List[object]]::new()
 Add-Check $checks "docker_compose_file" ($(if (Test-Path -LiteralPath $composePath -PathType Leaf) { "ok" } else { "error" })) "$composePath" "docker-compose.yml must exist before upgrade."
 Add-Check $checks "data_directory" ($(if (Test-Path -LiteralPath $dataPath -PathType Container) { "ok" } else { "warn" })) "$dataPath" "Confirm named volumes or local data directory before upgrade."
 
-$panelToken = Read-DotEnvValue -Path $envPath -Name "PANEL_TOKEN"
-if ([string]::IsNullOrWhiteSpace($panelToken) -or $panelToken -eq "change-me") {
-    Add-Check $checks "panel_token" "warn" "PANEL_TOKEN is missing or default" "Set a long random PANEL_TOKEN before exposing the panel."
-} else {
-    Add-Check $checks "panel_token" "ok" "PANEL_TOKEN is configured"
-}
-
 $adminPassword = Read-DotEnvValue -Path $envPath -Name "ADMIN_PASSWORD"
 if ([string]::IsNullOrWhiteSpace($adminPassword)) {
     Add-Check $checks "admin_password" "warn" "ADMIN_PASSWORD is missing" "Existing initialized volumes can keep the old password; new installs need ADMIN_PASSWORD."

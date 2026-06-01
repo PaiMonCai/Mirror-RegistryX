@@ -7,7 +7,8 @@ cd "$ROOT"
 PANEL_URL="http://localhost:8080"
 REGISTRY_URL="http://localhost:5000"
 ENV_FILE=".env"
-PANEL_TOKEN_VALUE=""
+ADMIN_USERNAME=""
+ADMIN_PASSWORD=""
 SOURCE_IMAGE="docker.io/library/alpine:latest"
 TARGET_IMAGE=""
 RUN_SYNC=0
@@ -27,10 +28,11 @@ checking queue/history/diagnostics/observability, then cleaning up the temp
 mirror. It does not trigger an actual sync unless --run-sync is set.
 
 Options:
-  --env-file PATH              dotenv file to read PANEL_TOKEN from (default: .env)
+  --env-file PATH              dotenv file to read admin credentials from (default: .env)
   --panel-url URL              panel base URL (default: http://localhost:8080)
   --registry-url URL           registry base URL (default: http://localhost:5000)
-  --panel-token TOKEN          Bearer token override
+  --admin-username USER        login username override
+  --admin-password PASSWORD    login password override
   --source IMAGE               source image for temp mirror (default: docker.io/library/alpine:latest)
   --target IMAGE               target image override (default: localhost:5000/e2e/alpine-smoke-<ts>:latest)
   --run-sync                   trigger one sync for the selected mirror and wait for completion
@@ -44,7 +46,8 @@ while [[ $# -gt 0 ]]; do
     --env-file) ENV_FILE="$2"; shift 2 ;;
     --panel-url) PANEL_URL="$2"; shift 2 ;;
     --registry-url) REGISTRY_URL="$2"; shift 2 ;;
-    --panel-token) PANEL_TOKEN_VALUE="$2"; shift 2 ;;
+    --admin-username) ADMIN_USERNAME="$2"; shift 2 ;;
+    --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
     --source) SOURCE_IMAGE="$2"; shift 2 ;;
     --target) TARGET_IMAGE="$2"; shift 2 ;;
     --run-sync) RUN_SYNC=1; shift ;;
@@ -92,12 +95,14 @@ read_dotenv_value() {
 }
 
 config_value() {
-  local name="$1" value=""
+  local name="$1" default="${2:-}" value=""
   value="$(read_dotenv_value "$name" || true)"
   if [[ -n "$value" ]]; then
     printf '%s' "$value"
   elif [[ -n "${!name:-}" ]]; then
     printf '%s' "${!name}"
+  else
+    printf '%s' "$default"
   fi
 }
 
@@ -125,20 +130,15 @@ else:
 
 api_json() {
   local method="$1" path="$2" body="${3:-}"
-  local token="$PANEL_TOKEN_VALUE" url
-  [[ -n "$token" ]] || token="$(config_value PANEL_TOKEN)"
-  if [[ -z "$token" ]]; then
-    echo "PANEL_TOKEN is required. Pass --panel-token or set it in $ENV_FILE." >&2
-    return 2
-  fi
+  local url
   url="$(join_url "$PANEL_URL" "api${path}")"
   if [[ -n "$body" ]]; then
     curl -k -sS --fail-with-body --max-time 30 -X "$method" "$url" \
-      -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+      -H 'Content-Type: application/json' \
       -b "$COOKIE_JAR" -c "$COOKIE_JAR" --data "$body"
   else
     curl -k -sS --fail-with-body --max-time 30 -X "$method" "$url" \
-      -H "Authorization: Bearer $token" -b "$COOKIE_JAR" -c "$COOKIE_JAR"
+      -b "$COOKIE_JAR" -c "$COOKIE_JAR"
   fi
 }
 
@@ -181,6 +181,22 @@ if [[ -z "$TARGET_IMAGE" ]]; then
   TARGET_IMAGE="${TARGET_IMAGE#https://}"
   TARGET_IMAGE="${TARGET_IMAGE%/}/e2e/alpine-smoke-${ts}:latest"
 fi
+
+admin_user="${ADMIN_USERNAME:-$(config_value ADMIN_USERNAME admin)}"
+admin_pass="${ADMIN_PASSWORD:-$(config_value ADMIN_PASSWORD)}"
+if [[ -z "$admin_user" || -z "$admin_pass" ]]; then
+  echo "Admin username/password are required. Pass --admin-username/--admin-password or set ADMIN_USERNAME/ADMIN_PASSWORD in $ENV_FILE." >&2
+  exit 2
+fi
+
+step "Logging in"
+login_body="$(SMOKE_ADMIN_USER="$admin_user" SMOKE_ADMIN_PASS="$admin_pass" python3 -c 'import json, os; print(json.dumps({"username": os.environ["SMOKE_ADMIN_USER"], "password": os.environ["SMOKE_ADMIN_PASS"]}))')"
+login="$(api_json POST '/auth/login' "$login_body")"
+if [[ "$(printf '%s' "$login" | json_get ok)" != "true" ]]; then
+  echo "Login response did not report ok=true." >&2
+  exit 1
+fi
+ok "Panel login succeeded"
 
 step "Checking panel status"
 status_payload="$(api_json GET '/status' '')"

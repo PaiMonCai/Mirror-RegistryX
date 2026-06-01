@@ -45,7 +45,6 @@ def make_panel_client(
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("REGISTRY_STORAGE_PATH", str(registry_storage_path))
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
-    monkeypatch.setenv("PANEL_TOKEN", "test-token")
     monkeypatch.setenv("WORKER_TOKEN", "worker-token")
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-password")
@@ -101,11 +100,11 @@ def test_unauthenticated_api_requires_login(tmp_path, monkeypatch):
     assert response.status_code == 401
 
 
-def test_bearer_token_remains_automation_compatible(tmp_path, monkeypatch):
+def test_bearer_tokens_are_rejected(tmp_path, monkeypatch):
     client, _, _, _ = make_panel_client(tmp_path, monkeypatch, login=False)
     headers = {"Authorization": "Bearer test-token"}
 
-    assert client.get("/api/status", headers=headers).status_code == 200
+    assert client.get("/api/status", headers=headers).status_code == 401
     response = client.post(
         "/api/mirrors",
         json={
@@ -114,7 +113,8 @@ def test_bearer_token_remains_automation_compatible(tmp_path, monkeypatch):
         },
         headers=headers,
     )
-    assert response.status_code == 200
+    assert response.status_code == 401
+    assert client.get("/api/status", headers={"Authorization": "Bearer mrt_fake"}).status_code == 401
 
 
 def test_session_expiry_requires_login_again(tmp_path, monkeypatch):
@@ -127,9 +127,9 @@ def test_session_expiry_requires_login_again(tmp_path, monkeypatch):
     assert client.get("/api/status").status_code == 401
 
 
-def test_access_users_roles_and_api_tokens(panel_app):
+def test_access_users_roles_and_rejects_api_tokens(panel_app, tmp_path, monkeypatch):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     created = client.post(
         "/api/access/users",
@@ -146,25 +146,13 @@ def test_access_users_roles_and_api_tokens(panel_app):
     assert viewer_client.get("/api/status").status_code == 200
 
     assert client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"}).status_code == 200
-    issued = client.post(
+    assert client.get("/api/access/tokens").status_code == 404
+    assert client.post(
         "/api/access/tokens",
         json={"name": "sync-bot", "role": "operator", "scopes": ["sync"]},
-        headers=headers,
-    ).json()
-    token = issued["token"]
-    assert token.startswith("mrt_")
-    assert token not in json.dumps(client.get("/api/access/tokens", headers=headers).json())
-    assert client.post("/api/sync", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-    denied_by_scope = client.post(
-        "/api/mirrors",
-        json={"source": "docker.io/library/alpine:latest", "target": "localhost:5000/library/alpine:latest"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert denied_by_scope.status_code == 403
-    assert "scope" in denied_by_scope.json()["message"]
-    revoked = client.post(f"/api/access/tokens/{issued['api_token']['id']}/revoke", headers=headers).json()["api_token"]
-    assert revoked["revoked"] is True
-    assert client.post("/api/sync", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+    ).status_code in {404, 405}
+    assert client.post("/api/auth/logout").status_code == 200
+    assert client.post("/api/sync", headers={"Authorization": "Bearer mrt_fake"}).status_code == 401
 
 
 def test_login_audit_redacts_secret_values(tmp_path, monkeypatch):
@@ -173,8 +161,9 @@ def test_login_audit_redacts_secret_values(tmp_path, monkeypatch):
     client.post("/api/auth/login", json={"username": "admin", "password": "wrong-password"})
     assert client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"}).status_code == 200
     assert client.post("/api/auth/logout").status_code == 200
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"}).status_code == 200
 
-    audit = client.get("/api/audit-logs", headers={"Authorization": "Bearer test-token"}).json()
+    audit = client.get("/api/audit-logs", headers={}).json()
     audit_text = json.dumps(audit, ensure_ascii=False)
     assert "login_failed" in audit_text
     assert "logout" in audit_text
@@ -185,7 +174,7 @@ def test_login_audit_redacts_secret_values(tmp_path, monkeypatch):
 
 def test_status_and_mirror_crud(panel_app):
     client, config_path, state_path, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     assert client.get("/api/status").json()["total"] == 0
     assert client.post(
@@ -250,7 +239,7 @@ def test_write_routes_accept_authenticated_session(panel_app):
 def test_trigger_sync_creates_trigger_file(panel_app):
     client, _, _, trigger_path = panel_app
 
-    response = client.post("/api/sync", headers={"Authorization": "Bearer test-token"})
+    response = client.post("/api/sync", headers={})
 
     assert response.status_code == 200
     data = response.json()
@@ -265,7 +254,7 @@ def test_trigger_sync_creates_trigger_file(panel_app):
 
 def test_sync_queue_control_flow(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     queue = client.post("/api/sync", headers=headers).json()["queue"]
     queue_id = queue["id"]
@@ -284,7 +273,7 @@ def test_sync_queue_control_flow(panel_app):
 def test_worker_heartbeat_claim_and_complete(panel_app):
     client, _, _, _ = panel_app
     headers = {"X-Worker-Token": "worker-token"}
-    admin_headers = {"Authorization": "Bearer test-token"}
+    admin_headers = {}
 
     heartbeat = client.post(
         "/api/workers/heartbeat",
@@ -321,7 +310,7 @@ def test_rejects_image_reference_without_tag(panel_app):
             "source": "docker.io/library/busybox",
             "target": "localhost:5000/library/busybox:latest",
         },
-        headers={"Authorization": "Bearer test-token"},
+        headers={},
     )
 
     assert response.status_code == 400
@@ -329,7 +318,7 @@ def test_rejects_image_reference_without_tag(panel_app):
 
 def test_single_mirror_sync_trigger_writes_source(panel_app):
     client, _, _, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     client.post(
         "/api/mirrors",
@@ -357,7 +346,7 @@ def test_diagnostics_and_sync_runs_are_available(panel_app):
 
 def test_settings_include_v3_controls(panel_app):
     client, config_path, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     response = client.put(
         "/api/settings",
@@ -381,7 +370,7 @@ def test_settings_include_v3_controls(panel_app):
 
 def test_mirror_export_import(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     payload = {
         "mirrors": [
             {
@@ -408,7 +397,7 @@ def write_registry_blob(root: Path, digest_hex: str, content: bytes) -> None:
 
 def test_download_mirror_artifact_from_local_registry_storage(panel_app, tmp_path):
     client, config_path, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     assert client.post(
         "/api/mirrors/import",
         json={
@@ -456,7 +445,7 @@ def test_download_mirror_artifact_from_local_registry_storage(panel_app, tmp_pat
 
 def test_download_mirror_artifact_missing_storage_returns_404(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     client.post(
         "/api/mirrors/import",
         json={"replace": True, "mirrors": [{"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest"}]},
@@ -501,7 +490,7 @@ services:
 
 def test_mirror_discovery_imports_kubernetes_images_and_can_trigger_sync(panel_app):
     client, config_path, _, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     payload = {
         "source_type": "kubernetes",
         "target_registry": "localhost:5000",
@@ -553,7 +542,7 @@ spec:
 
 def test_mirror_discovery_text_detects_existing_sources_and_replace_mode(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     client.post(
         "/api/mirrors",
         json={
@@ -584,7 +573,7 @@ def test_mirror_discovery_text_detects_existing_sources_and_replace_mode(panel_a
 
 def test_mirror_preflight_reports_protection_and_does_not_mutate_state(panel_app):
     client, _, state_path, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     state_path.write_text(json.dumps({"docker.io/library/busybox:v1.0.0": "sha256:old"}), encoding="utf-8")
     client.post(
         "/api/tag-protection",
@@ -614,7 +603,7 @@ def test_mirror_preflight_reports_protection_and_does_not_mutate_state(panel_app
 
 def test_mirror_preflight_uses_explicit_credentials_without_secret_leak(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     create = client.post(
         "/api/credentials",
         json={
@@ -659,7 +648,7 @@ def test_mirror_preflight_uses_explicit_credentials_without_secret_leak(panel_ap
 
 def test_mirror_preflight_batch_defaults_to_config_and_remote_probe(panel_app, monkeypatch):
     client, _, state_path, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     client.post(
         "/api/mirrors",
         json={
@@ -709,7 +698,7 @@ def test_mirror_preflight_batch_defaults_to_config_and_remote_probe(panel_app, m
 
 def test_retry_failed_run_writes_sources_trigger(panel_app):
     client, _, _, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     import panel.main as panel_main
 
@@ -744,7 +733,7 @@ def test_retry_failed_run_writes_sources_trigger(panel_app):
 
 def test_storage_delete_mark_and_security_guide(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     response = client.post(
         "/api/storage/delete-mark",
@@ -760,12 +749,13 @@ def test_storage_delete_mark_and_security_guide(panel_app):
     assert guide["recommended"]
     assert guide["security_checks"]["summary"]["warn"] >= 1
     checks = client.get("/api/security-checks").json()
-    assert any(item["name"] == "PANEL_TOKEN" for item in checks["checks"])
+    assert all(item["name"] != "PANEL_TOKEN" for item in checks["checks"])
+    assert any(item["name"] == "Session Cookie" for item in checks["checks"])
 
 
 def test_v4_registry_group_platform_and_audit(panel_app):
     client, config_path, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     registry_response = client.post(
         "/api/registries",
@@ -813,7 +803,7 @@ def test_v4_registry_group_platform_and_audit(panel_app):
 
 def test_v4_database_configuration_guide(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     response = client.put(
         "/api/settings",
@@ -832,7 +822,7 @@ def test_v4_database_configuration_guide(panel_app):
 
 def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
     client, config_path, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     create = client.post(
         "/api/credentials",
@@ -923,7 +913,7 @@ def test_credentials_require_secret_key(tmp_path, monkeypatch):
             "username": "alice",
             "secret": "top-secret",
         },
-        headers={"Authorization": "Bearer test-token"},
+        headers={},
     )
 
     assert response.status_code == 400
@@ -933,7 +923,7 @@ def test_credentials_require_secret_key(tmp_path, monkeypatch):
 
 def test_governance_blocks_protected_delete_and_retention_marks(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     rule_response = client.post(
         "/api/tag-protection",
@@ -1006,7 +996,7 @@ def test_governance_blocks_protected_delete_and_retention_marks(panel_app):
 
 def test_backup_restore_guide_and_verify(panel_app):
     client, _, _, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
     guide = client.get("/api/backup-restore-guide").json()
     assert "CREDENTIALS_SECRET_KEY" in guide["required_items"]
     assert any("/v2/" in item for item in guide["tls_entry"].values())
@@ -1052,7 +1042,7 @@ def test_backup_restore_guide_and_verify(panel_app):
 
 def test_schedules_default_disabled_and_trigger_policy_run(panel_app):
     client, _, _, trigger_path = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     disabled_latest = client.post(
         "/api/schedules",
@@ -1159,7 +1149,7 @@ def test_manifest_stats_deduplicate_shared_blobs(panel_app):
 
 def test_storage_returns_marks_and_cached_stats_when_registry_unavailable(panel_app, monkeypatch):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     import panel.main as panel_main
 
@@ -1194,7 +1184,7 @@ def test_storage_returns_marks_and_cached_stats_when_registry_unavailable(panel_
 
 def test_ops_summary_explains_recent_failures_and_risk_flags(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     import panel.main as panel_main
 
@@ -1244,7 +1234,7 @@ def test_ops_summary_explains_recent_failures_and_risk_flags(panel_app):
 
 def test_observability_summary_aggregates_windows_failures_and_alerts(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     import panel.main as panel_main
 
@@ -1373,7 +1363,7 @@ def test_observability_summary_aggregates_windows_failures_and_alerts(panel_app)
 
 def test_diagnostic_bundle_redacts_secrets_and_includes_ops_context(panel_app, monkeypatch):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     import panel.main as panel_main
 
@@ -1432,7 +1422,7 @@ def test_diagnostic_bundle_redacts_secrets_and_includes_ops_context(panel_app, m
 
 def test_upgrade_guide_and_release_check_script_are_available(panel_app):
     client, _, _, _ = panel_app
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {}
 
     guide = client.get("/api/ops/upgrade-guide").json()
 
@@ -1450,7 +1440,8 @@ def test_upgrade_guide_and_release_check_script_are_available(panel_app):
     assert "unit-secret-key" not in json.dumps(install_guide, ensure_ascii=False)
 
     setup = client.get("/api/setup/checklist").json()
-    assert any(item["name"] == "panel_token" for item in setup["checks"])
+    assert any(item["name"] == "admin_account" for item in setup["checks"])
+    assert all(item["name"] != "panel_token" for item in setup["checks"])
 
     preflight = client.post(
         "/api/install-upgrade/preflight",
@@ -1488,18 +1479,35 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert "schema_migrations" in tables
         assert "mirrors" in tables
         assert "sync_queue" in tables
+        assert "api_tokens" not in tables
         versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert versions == ["0001_initial"]
+        assert versions == ["0001_initial", "0002_drop_api_tokens"]
 
         panel_db.init_db(conn)
         repeat_versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert repeat_versions == ["0001_initial"]
+        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens"]
+        repeat_tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "api_tokens" not in repeat_tables
 
     old_db_path = tmp_path / "old.db"
     with sqlite3.connect(old_db_path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute(
             "CREATE TABLE mirrors (source TEXT PRIMARY KEY, target TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, last_digest TEXT, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE api_tokens (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT
+            )
+            """
         )
         conn.execute(
             "INSERT INTO mirrors(source, target, updated_at) VALUES (?, ?, ?)",
@@ -1510,7 +1518,9 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         panel_db.init_db(conn)
         assert conn.execute("SELECT COUNT(*) FROM mirrors").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0001_initial'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0002_drop_api_tokens'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'api_tokens'").fetchone()[0] == 0
 
     second_old_db_path = tmp_path / "second-old.db"
     with sqlite3.connect(second_old_db_path) as conn:
@@ -1525,6 +1535,7 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         panel_db.init_db(conn)
         assert conn.execute("SELECT value FROM settings WHERE key = 'check_interval_minutes'").fetchone()[0] == "30"
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0001_initial'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0002_drop_api_tokens'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0] == 0
 
     failing_db_path = tmp_path / "failing.db"
@@ -1563,7 +1574,7 @@ def test_api_error_response_envelope(tmp_path, monkeypatch):
     assert response.json() == {
         "code": "UNAUTHENTICATED",
         "message": "需要登录",
-        "suggestion": "请重新登录，或检查自动化调用使用的 Bearer token。",
+        "suggestion": "请重新登录。",
         "details": {},
     }
 

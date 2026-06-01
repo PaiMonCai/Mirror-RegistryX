@@ -46,7 +46,7 @@ function App() {
   const [logs, setLogs] = useState('');
   const [events, setEvents] = useState<AnyRecord[]>([]);
   const [audit, setAudit] = useState<AnyRecord[]>([]);
-  const [access, setAccess] = useState<AnyRecord>({ users: [], tokens: [] });
+  const [access, setAccess] = useState<AnyRecord>({ users: [] });
   const [security, setSecurity] = useState<AnyRecord>({});
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -56,7 +56,7 @@ function App() {
   const [workerGuide, setWorkerGuide] = useState<AnyRecord>({});
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
-  const api = useMemo(() => createApiClient(() => ''), []);
+  const api = useMemo(() => createApiClient(), []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -144,11 +144,7 @@ function App() {
   }
 
   async function loadAccess() {
-    const [users, tokens] = await Promise.all([
-      api('GET', '/access/users'),
-      api('GET', '/access/tokens'),
-    ]);
-    setAccess({ users, tokens });
+    setAccess({ users: await api('GET', '/access/users') });
   }
 
   async function loadSecurity() {
@@ -283,7 +279,6 @@ function App() {
             <div className="session-meta">
               <strong>{auth.user?.username || 'admin'}</strong>
               <span>{auth.user?.role || '超级管理员'}</span>
-              {status.using_default_token && <p className="warn">PANEL_TOKEN 仍为默认值。</p>}
             </div>
             <span aria-hidden="true">↔</span>
           </div>
