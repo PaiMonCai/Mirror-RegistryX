@@ -19,6 +19,10 @@ import { ConfirmButton } from '../components/ConfirmButton';
 import type { AnyRecord, View, Mirror, Credential } from '../types';
 import { cx, diagnosticMessage, formatMB, formatRate, hostFromImage } from '../utils';
 
+function TableText({ value }: { value: string }) {
+  return <span className="table-clip" title={value}>{value}</span>;
+}
+
 export function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify }: any) {
   const [form, setForm] = useState({ source: '', target: '', source_credential_id: '', target_credential_id: '' });
   const [preflightRemote, setPreflightRemote] = useState(false);
@@ -172,10 +176,51 @@ export function Mirrors({ mirrors, credentials, search, setSearch, api, reload, 
           <span className="chip">{importResult.replace ? 'replace' : 'merge'}</span>
         </div>}
       </Panel>
-      <Panel title="镜像列表" action={<div className="search"><Search size={15} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索镜像、tag、环境" /></div>}>
-        <table><thead><tr><th>源</th><th>目标</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>{mirrors.map((m: AnyRecord) => <tr key={m.index}><td>{m.source}</td><td>{m.target}</td><td>{m.source_credential_id || `host:${hostFromImage(m.source)}`} / {m.target_credential_id || `host:${hostFromImage(m.target)}`}</td><td><Badge value={m.synced ? 'synced' : 'pending'} /></td><td className="row-actions"><button onClick={() => preflightMirror(m)}><ListChecks size={14} />预检</button><button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已入队'))}>同步</button><button onClick={() => downloadArtifact(m)}><Download size={14} />导出 artifact</button><ConfirmButton confirmText="确认重置" className="" onConfirm={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</ConfirmButton><ConfirmButton confirmText="确认删除" onConfirm={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></ConfirmButton></td></tr>)}</tbody>
-        </table>
+      <Panel title="镜像列表" action={<div className="search mirror-search"><Search size={15} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索镜像、tag、环境" /></div>}>
+        <div className="table-scroll mirror-table-scroll">
+          <table className="mirror-table">
+            <colgroup>
+              <col className="mirror-col-source" />
+              <col className="mirror-col-target" />
+              <col className="mirror-col-credentials" />
+              <col className="mirror-col-status" />
+              <col className="mirror-col-actions" />
+            </colgroup>
+            <thead><tr><th>源</th><th>目标</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>{mirrors.map((m: AnyRecord) => {
+              const sourceCredential = m.source_credential_id || `host:${hostFromImage(m.source)}`;
+              const targetCredential = m.target_credential_id || `host:${hostFromImage(m.target)}`;
+              return (
+                <tr key={m.index}>
+                  <td className="mirror-cell"><TableText value={m.source} /></td>
+                  <td className="mirror-cell"><TableText value={m.target} /></td>
+                  <td className="mirror-cell">
+                    <div className="mirror-credentials">
+                      <div className="mirror-credential">
+                        <span className="mirror-credential-label">源</span>
+                        <TableText value={sourceCredential} />
+                      </div>
+                      <div className="mirror-credential">
+                        <span className="mirror-credential-label">目标</span>
+                        <TableText value={targetCredential} />
+                      </div>
+                    </div>
+                  </td>
+                  <td className="mirror-cell mirror-status"><Badge value={m.synced ? 'synced' : 'pending'} /></td>
+                  <td className="mirror-cell">
+                    <div className="row-actions mirror-actions">
+                      <button onClick={() => preflightMirror(m)}><ListChecks size={14} />预检</button>
+                      <button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已入队'))}>同步</button>
+                      <button onClick={() => downloadArtifact(m)}><Download size={14} />导出 artifact</button>
+                      <ConfirmButton confirmText="确认重置" className="danger" onConfirm={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</ConfirmButton>
+                      <ConfirmButton confirmText="确认删除" onConfirm={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></ConfirmButton>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        </div>
       </Panel>
     </div>
   );

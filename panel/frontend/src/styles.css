@@ -635,6 +635,10 @@ select option {
   box-shadow: 0 0 0 3px rgba(41, 151, 255, 0.12);
 }
 
+.mirror-search {
+  min-width: 290px;
+}
+
 /* Content */
 .content {
   flex: 1;
@@ -955,6 +959,95 @@ td {
   font-size: 13px;
   text-align: left;
   vertical-align: middle;
+}
+
+.table-clip {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.mirror-table {
+  table-layout: fixed;
+}
+
+.mirror-table thead th,
+.mirror-table tbody td {
+  padding: 10px 14px;
+}
+
+.mirror-col-source {
+  width: 22%;
+}
+
+.mirror-col-target {
+  width: 30%;
+}
+
+.mirror-col-credentials {
+  width: 24%;
+}
+
+.mirror-col-status {
+  width: 10%;
+}
+
+.mirror-col-actions {
+  width: 14%;
+}
+
+.mirror-cell {
+  vertical-align: top;
+}
+
+.mirror-credentials {
+  display: grid;
+  gap: 6px;
+}
+
+.mirror-credential {
+  display: grid;
+  gap: 2px;
+}
+
+.mirror-credential-label {
+  color: var(--text3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+}
+
+.mirror-status {
+  white-space: nowrap;
+}
+
+.mirror-actions {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.mirror-actions > button {
+  flex-shrink: 0;
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.mirror-actions::-webkit-scrollbar {
+  height: 4px;
+}
+
+.mirror-actions::-webkit-scrollbar-thumb {
+  background: rgba(74, 98, 138, 0.18);
+  border-radius: 999px;
 }
 
 th.num,
@@ -1830,6 +1923,30 @@ pre::-webkit-scrollbar-thumb,
     grid-template-columns: repeat(2, minmax(140px, 1fr));
   }
 
+  .mirror-search {
+    min-width: 220px;
+  }
+
+  .mirror-col-source {
+    width: 24%;
+  }
+
+  .mirror-col-target {
+    width: 30%;
+  }
+
+  .mirror-col-credentials {
+    width: 26%;
+  }
+
+  .mirror-col-status {
+    width: 10%;
+  }
+
+  .mirror-col-actions {
+    width: 10%;
+  }
+
   .form-grid,
   .credentials-form,
   .discovery-form,
@@ -1965,6 +2082,10 @@ pre::-webkit-scrollbar-thumb,
   table {
     min-width: 720px;
     font-size: 12px;
+  }
+
+  .mirror-table {
+    min-width: 980px;
   }
 
   th,
