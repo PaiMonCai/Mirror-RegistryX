@@ -22,11 +22,12 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
 };
 
 export const navGroups: Array<{ label: string; views: View[] }> = [
-  { label: '监控', views: ['dashboard', 'mirrors', 'runs', 'observability'] },
-  { label: '发布', views: ['credentials', 'governance', 'schedules', 'workers'] },
-  { label: '平台', views: ['platform', 'storage', 'diagnostics'] },
-  { label: '记录', views: ['logs', 'audit'] },
-  { label: '系统', views: ['access', 'security', 'settings', 'upgrade'] },
+  { label: '概览', views: ['dashboard'] },
+  { label: '仓库', views: ['mirrors', 'credentials', 'storage'] },
+  { label: '计划', views: ['runs', 'schedules'] },
+  { label: '设置', views: ['platform', 'settings', 'access', 'security', 'diagnostics', 'logs'] },
 ];
 
-export const views = navGroups.flatMap((group) => group.views);
+export const hiddenViews: View[] = ['observability', 'governance', 'workers', 'upgrade', 'audit'];
+
+export const views = [...navGroups.flatMap((group) => group.views), ...hiddenViews];
