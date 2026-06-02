@@ -8,7 +8,7 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
   mirrors: { title: '镜像', subtitle: '添加、同步、导入和导出镜像配置。', icon: <ListChecks size={15} /> },
   credentials: { title: '凭据', subtitle: '保存 Docker Hub、GHCR 或目标仓库的账号 token。', icon: <KeyRound size={15} /> },
   storage: { title: '存储', subtitle: '查看本地仓库占用、删除标记和清理命令。', icon: <HardDrive size={15} /> },
-  governance: { title: '治理', subtitle: '模板、发现、通知、窗口和批量操作。', icon: <ShieldCheck size={15} /> },
+  governance: { title: '高级', subtitle: '镜像发现、模板、通知、窗口和批量操作。', icon: <ShieldCheck size={15} /> },
   operations: { title: '运维', subtitle: '代理心跳、服务状态、更新、重启和诊断任务。', icon: <Wrench size={15} /> },
   logs: { title: '日志', subtitle: '同步日志和事件记录。', icon: <ScrollText size={15} /> },
   settings: { title: '设置', subtitle: '同步间隔、并发、重试和飞书通知。', icon: <Settings size={15} /> },
@@ -16,8 +16,8 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
 
 export const navGroups: Array<{ label: string; views: View[] }> = [
   { label: '概览', views: ['dashboard'] },
-  { label: '镜像', views: ['mirrors', 'credentials', 'storage', 'governance'] },
-  { label: '同步', views: ['runs', 'operations', 'logs'] },
+  { label: '镜像', views: ['mirrors', 'credentials', 'storage'] },
+  { label: '运行', views: ['runs', 'logs', 'operations', 'governance'] },
   { label: '设置', views: ['settings'] },
 ];
 

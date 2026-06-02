@@ -39,6 +39,7 @@ def require_paths() -> None:
     required = [
         "README.md",
         "README.en.md",
+        "PROJECT_BRIEF.md",
         ".env.example",
         "docker-compose.yml",
         "docker-compose.dev.yml",
@@ -314,22 +315,39 @@ def require_smoke_is_core_only() -> None:
 def require_docs_and_env_are_core_only() -> None:
     readme = read("README.md")
     readme_en = read("README.en.md")
+    brief = read("PROJECT_BRIEF.md")
     env_example = read(".env.example")
     for path, source in [("README.md", readme), ("README.en.md", readme_en), (".env.example", env_example)]:
         if "CREDENTIALS_SECRET_KEY" in source:
             fail(f"{path} still documents CREDENTIALS_SECRET_KEY as required")
-    for snippet in [
+    shared_readme_snippets = [
+        "PROJECT_BRIEF.md",
         "docker compose pull",
         "docker compose up -d",
         "docker compose exec panel python -m panel.password_reset admin",
         "docker compose run --rm --no-deps panel python -m panel.password_reset admin",
         "SESSION_COOKIE_SECURE=false",
         "DATABASE_URL=sqlite:////data/mirror-registry.db",
-    ]:
+    ]
+    for snippet in shared_readme_snippets:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
+    for snippet in ["功能分层", "核心功能", "增强功能"]:
+        if snippet not in readme:
+            fail(f"README.md missing {snippet!r}")
+    for snippet in ["Capability Layers", "Core capabilities", "Enhanced capabilities"]:
+        if snippet not in readme_en:
+            fail(f"README.en.md missing {snippet!r}")
+    for snippet in [
+        "single-node private Docker image mirror",
+        "Core Capabilities",
+        "Enhanced Capabilities",
+        "The core sync workflow must not depend on ops-agent",
+    ]:
+        if snippet not in brief:
+            fail(f"PROJECT_BRIEF.md missing {snippet!r}")
     for snippet in [
         "ADMIN_USERNAME=",
         "ADMIN_PASSWORD=",
