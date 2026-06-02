@@ -15,11 +15,12 @@ ALLOWED_ACTIONS = {
     "registry_gc",
     "backup_verify",
     "diagnostic_bundle",
+    "restore_drill",
 }
 ALLOWED_SERVICES = ("panel", "sync", "registry", "ops-agent")
 DEFAULT_UPDATE_SERVICES = ("panel", "sync", "registry")
 HIGH_RISK_ACTIONS = {"update_services", "registry_gc"}
-IDEMPOTENT_ACTIONS = {"service_status", "backup_verify", "diagnostic_bundle"}
+IDEMPOTENT_ACTIONS = {"service_status", "backup_verify", "diagnostic_bundle", "restore_drill"}
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled", "timed_out"}
 ACTIVE_TASK_STATUSES = {"queued", "claimed", "running"}
 AGENT_CAPABILITIES = tuple(sorted(ALLOWED_ACTIONS))
@@ -31,6 +32,7 @@ DEFAULT_TIMEOUTS = {
     "registry_gc": 1800,
     "backup_verify": 300,
     "diagnostic_bundle": 300,
+    "restore_drill": 900,
 }
 
 SENSITIVE_KEY_MARKERS = (
@@ -121,6 +123,11 @@ def validate_action(action: str, params: dict[str, Any] | None = None) -> Valida
         normalized = {"request_id": request_id} if request_id else {}
     elif clean_action in {"backup_verify", "diagnostic_bundle"}:
         normalized = {}
+    elif clean_action == "restore_drill":
+        compose_project = str(raw_params.get("compose_project") or "mirror-registry-restore-drill").strip()
+        backup_package = str(raw_params.get("backup_package") or "").strip()
+        cleanup = bool(raw_params.get("cleanup", True))
+        normalized = {"compose_project": compose_project[:120] or "mirror-registry-restore-drill", "backup_package": backup_package[:1000], "cleanup": cleanup}
 
     return ValidatedAction(
         action=clean_action,

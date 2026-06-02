@@ -134,6 +134,27 @@ def diagnostic_bundle_result(config: AgentConfig) -> dict[str, Any]:
     )
 
 
+def restore_drill_result(config: AgentConfig, params: dict[str, Any]) -> dict[str, Any]:
+    compose_file = Path(config.compose_file)
+    workspace = compose_file.parent
+    backup_package = str(params.get("backup_package") or "").strip()
+    checks = [
+        {"name": "compose_file", "status": "ok" if compose_file.exists() else "warn", "path": str(compose_file)},
+        {"name": "workspace", "status": "ok" if workspace.exists() else "warn", "path": str(workspace)},
+        {"name": "backup_package", "status": "ok" if backup_package and Path(backup_package).exists() else "warn", "path": backup_package},
+        {"name": "docker_cli", "status": "ok" if shutil.which("docker") else "warn"},
+    ]
+    return redact_data(
+        {
+            "status": "ok" if all(item["status"] == "ok" for item in checks[:2]) else "warn",
+            "compose_project": params.get("compose_project") or "mirror-registry-restore-drill",
+            "cleanup": bool(params.get("cleanup", True)),
+            "checks": checks,
+            "message": "restore drill report generated without modifying production data",
+        }
+    )
+
+
 def execute_task(config: AgentConfig, task: dict[str, Any], client: httpx.Client) -> None:
     task_id = int(task["id"])
     action = str(task["action"])
@@ -148,6 +169,10 @@ def execute_task(config: AgentConfig, task: dict[str, Any], client: httpx.Client
         return
     if validated.action == "diagnostic_bundle":
         result = diagnostic_bundle_result(config)
+        complete_task(config, client, task_id, "succeeded", 0, json.dumps(result, ensure_ascii=False), "", result)
+        return
+    if validated.action == "restore_drill":
+        result = restore_drill_result(config, validated.params)
         complete_task(config, client, task_id, "succeeded", 0, json.dumps(result, ensure_ascii=False), "", result)
         return
 

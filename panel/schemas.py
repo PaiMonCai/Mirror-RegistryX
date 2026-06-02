@@ -323,3 +323,25 @@ class BulkOperationIn(BaseModel):
 class MirrorManualPushIn(MirrorPushIn):
     confirm_bypass_window: bool = False
     bypass_reason: str | None = Field(default="", max_length=500)
+
+
+class ReleaseBypassIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ReleasePromoteIn(BaseModel):
+    target_image: str = Field(min_length=1, max_length=255)
+    confirm: bool = False
+    reason: str | None = Field(default="", max_length=500)
+
+
+class ReleaseRollbackIn(BaseModel):
+    confirm: bool = False
+    reason: str | None = Field(default="", max_length=500)
+
+
+class RestoreDrillIn(BaseModel):
+    backup_package: str | None = Field(default="", max_length=1000)
+    compose_project: str = Field(default="mirror-registry-restore-drill", max_length=120)
+    cleanup: bool = True
+    use_ops_agent: bool = True

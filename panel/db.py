@@ -440,10 +440,107 @@ CREATE TABLE IF NOT EXISTS notification_events (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mirror_releases (
+    id TEXT PRIMARY KEY,
+    mirror_source TEXT NOT NULL,
+    source_image TEXT NOT NULL,
+    target_image TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    target_digest TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    target_tag TEXT NOT NULL,
+    rule_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    policy_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    push_run_id INTEGER,
+    push_event_id INTEGER,
+    parent_release_id TEXT,
+    release_type TEXT NOT NULL DEFAULT 'mirror_push',
+    trust_status TEXT NOT NULL DEFAULT 'unknown',
+    scan_status TEXT NOT NULL DEFAULT 'not_scanned',
+    scanner TEXT,
+    scanner_version TEXT,
+    severity_critical INTEGER NOT NULL DEFAULT 0,
+    severity_high INTEGER NOT NULL DEFAULT 0,
+    severity_medium INTEGER NOT NULL DEFAULT 0,
+    severity_low INTEGER NOT NULL DEFAULT 0,
+    severity_unknown INTEGER NOT NULL DEFAULT 0,
+    scan_report_path TEXT,
+    sbom_path TEXT,
+    metadata_path TEXT,
+    signature_status TEXT NOT NULL DEFAULT 'skipped',
+    signature_subject TEXT,
+    signature_issuer TEXT,
+    signature_checked_at TEXT,
+    bypass_reason TEXT,
+    bypassed_by TEXT,
+    bypassed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_scan_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id TEXT NOT NULL,
+    image_ref TEXT NOT NULL,
+    scanner TEXT NOT NULL DEFAULT 'trivy',
+    status TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+    exit_code INTEGER,
+    message TEXT,
+    log_tail TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS release_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT,
+    message TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS promotion_policies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_rule TEXT NOT NULL,
+    target_image TEXT NOT NULL,
+    require_scan_pass INTEGER NOT NULL DEFAULT 1,
+    block_on_critical INTEGER NOT NULL DEFAULT 1,
+    block_on_high INTEGER NOT NULL DEFAULT 0,
+    require_confirmation INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS restore_drills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    report_json TEXT NOT NULL DEFAULT '{}',
+    ops_task_id INTEGER,
+    requested_by TEXT NOT NULL DEFAULT 'panel',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_discovery_candidates_status ON discovery_candidates(status, last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_candidates_source_image ON discovery_candidates(source_id, source_image);
 CREATE INDEX IF NOT EXISTS idx_bulk_operation_items_operation ON bulk_operation_items(operation_id);
 CREATE INDEX IF NOT EXISTS idx_notification_events_policy ON notification_events(policy_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_mirror_releases_source_created ON mirror_releases(mirror_source, created_at);
+CREATE INDEX IF NOT EXISTS idx_mirror_releases_target_created ON mirror_releases(target_image, created_at);
+CREATE INDEX IF NOT EXISTS idx_mirror_releases_trust ON mirror_releases(trust_status, scan_status);
+CREATE INDEX IF NOT EXISTS idx_image_scan_tasks_status ON image_scan_tasks(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_release_events_release ON release_events(release_id, created_at);
 
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
@@ -882,6 +979,103 @@ POSTGRES_SCHEMA_STATEMENTS = [
         dedupe_key VARCHAR(255),
         payload_json TEXT NOT NULL DEFAULT '{}',
         created_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mirror_releases (
+        id VARCHAR(96) PRIMARY KEY,
+        mirror_source VARCHAR(255) NOT NULL,
+        source_image VARCHAR(255) NOT NULL,
+        target_image VARCHAR(255) NOT NULL,
+        source_digest TEXT NOT NULL,
+        target_digest TEXT NOT NULL,
+        target_repo VARCHAR(255) NOT NULL,
+        target_tag VARCHAR(128) NOT NULL,
+        rule_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        policy_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        push_run_id INTEGER,
+        push_event_id INTEGER,
+        parent_release_id VARCHAR(96),
+        release_type VARCHAR(32) NOT NULL DEFAULT 'mirror_push',
+        trust_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
+        scan_status VARCHAR(32) NOT NULL DEFAULT 'not_scanned',
+        scanner VARCHAR(32),
+        scanner_version VARCHAR(64),
+        severity_critical INTEGER NOT NULL DEFAULT 0,
+        severity_high INTEGER NOT NULL DEFAULT 0,
+        severity_medium INTEGER NOT NULL DEFAULT 0,
+        severity_low INTEGER NOT NULL DEFAULT 0,
+        severity_unknown INTEGER NOT NULL DEFAULT 0,
+        scan_report_path TEXT,
+        sbom_path TEXT,
+        metadata_path TEXT,
+        signature_status VARCHAR(32) NOT NULL DEFAULT 'skipped',
+        signature_subject TEXT,
+        signature_issuer TEXT,
+        signature_checked_at VARCHAR(64),
+        bypass_reason TEXT,
+        bypassed_by VARCHAR(120),
+        bypassed_at VARCHAR(64),
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS image_scan_tasks (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        release_id VARCHAR(96) NOT NULL,
+        image_ref TEXT NOT NULL,
+        scanner VARCHAR(32) NOT NULL DEFAULT 'trivy',
+        status VARCHAR(32) NOT NULL,
+        scheduled_at VARCHAR(64) NOT NULL,
+        started_at VARCHAR(64),
+        finished_at VARCHAR(64),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+        exit_code INTEGER,
+        message TEXT,
+        log_tail TEXT,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS release_events (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        release_id VARCHAR(96) NOT NULL,
+        type VARCHAR(64) NOT NULL,
+        status VARCHAR(32),
+        message TEXT,
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        created_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS promotion_policies (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        source_rule VARCHAR(255) NOT NULL,
+        target_image VARCHAR(255) NOT NULL,
+        require_scan_pass INTEGER NOT NULL DEFAULT 1,
+        block_on_critical INTEGER NOT NULL DEFAULT 1,
+        block_on_high INTEGER NOT NULL DEFAULT 0,
+        require_confirmation INTEGER NOT NULL DEFAULT 1,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS restore_drills (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        status VARCHAR(32) NOT NULL,
+        scope_json TEXT NOT NULL DEFAULT '{}',
+        report_json TEXT NOT NULL DEFAULT '{}',
+        ops_task_id INTEGER,
+        requested_by VARCHAR(120) NOT NULL DEFAULT 'panel',
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        finished_at VARCHAR(64)
     )
     """,
     """

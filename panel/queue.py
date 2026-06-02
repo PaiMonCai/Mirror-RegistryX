@@ -127,7 +127,7 @@ def list_sync_queue(limit: int = 50, status: str = "", task_type: str = "") -> l
     bounded_limit = max(1, min(limit, 200))
     clean_status = status.strip().lower()
     clean_task_type = task_type.strip().lower()
-    if clean_task_type and clean_task_type not in {"sync", "check", "push"}:
+    if clean_task_type and clean_task_type not in {"sync", "check", "push", "scan", "promote", "rollback"}:
         raise HTTPException(400, "type 必须是 sync、check 或 push")
     if clean_status and clean_task_type:
         rows = db_rows(
@@ -205,7 +205,7 @@ def enqueue_sync_task(
     clean_reason = reason.strip() or "manual"
     clean_sources = clean_queue_sources(source=source, sources=sources)
     clean_task_type = task_type.strip().lower() if task_type else "sync"
-    if clean_task_type not in {"sync", "check", "push"}:
+    if clean_task_type not in {"sync", "check", "push", "scan", "promote", "rollback"}:
         clean_task_type = "sync"
     dedupe_key = queue_dedupe_key(f"{clean_task_type}:{clean_reason}:{digest}", clean_sources)
     if not force:

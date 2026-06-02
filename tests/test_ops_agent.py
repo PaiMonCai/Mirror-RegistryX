@@ -3,7 +3,7 @@ import json
 import pytest
 
 from mirror_registry_core.ops_agent import build_action_commands, redact_data, redact_text, validate_action
-from ops_agent.agent import AgentConfig, backup_verify_result, diagnostic_bundle_result
+from ops_agent.agent import AgentConfig, backup_verify_result, diagnostic_bundle_result, restore_drill_result
 
 
 def test_ops_action_validation_and_fixed_commands():
@@ -54,3 +54,43 @@ def test_agent_internal_checks_do_not_leak_token(tmp_path):
     assert "top-secret-token" not in json.dumps(backup, ensure_ascii=False)
     assert "top-secret-token" not in json.dumps(diagnostic, ensure_ascii=False)
     assert diagnostic["env"]["OPS_AGENT_TOKEN"] == "<redacted>"
+
+
+def test_restore_drill_validation_and_report_are_read_only_and_redacted(tmp_path):
+    compose_file = tmp_path / "docker-compose.yml"
+    backup_package = tmp_path / "backup.tar.gz"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    backup_package.write_text("backup", encoding="utf-8")
+    validated = validate_action(
+        "restore_drill",
+        {
+            "compose_project": "drill-project",
+            "backup_package": str(backup_package),
+            "cleanup": False,
+        },
+    )
+    assert validated.params == {
+        "compose_project": "drill-project",
+        "backup_package": str(backup_package),
+        "cleanup": False,
+    }
+    assert validated.requires_confirmation is False
+    assert validated.timeout_seconds == 900
+
+    config = AgentConfig(
+        panel_url="http://panel:8080",
+        agent_id="local",
+        token="top-secret-token",
+        host_label="Local host",
+        environment="test",
+        compose_file=str(compose_file),
+        poll_interval_seconds=1,
+        command_timeout_seconds=60,
+    )
+    result = restore_drill_result(config, validated.params)
+
+    assert result["compose_project"] == "drill-project"
+    assert result["cleanup"] is False
+    assert result["message"] == "restore drill report generated without modifying production data"
+    assert any(item["name"] == "backup_package" and item["status"] == "ok" for item in result["checks"])
+    assert "top-secret-token" not in json.dumps(result, ensure_ascii=False)

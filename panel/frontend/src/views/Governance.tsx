@@ -1,4 +1,4 @@
-import { BellRing, Boxes, Clock3, DownloadCloud, Eye, FileSearch, Play, RefreshCw, ShieldCheck } from 'lucide-react';
+import { BellRing, Boxes, Clock3, DownloadCloud, Eye, FileSearch, Play, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { formatApiError } from '../api';
 import { Badge, Metric, Panel } from '../components/common';
@@ -40,6 +40,9 @@ export function Governance({ mirrors, api, reloadMirrors, notify }: any) {
   const [policies, setPolicies] = useState<AnyRecord[]>([]);
   const [windows, setWindows] = useState<AnyRecord[]>([]);
   const [bulkOps, setBulkOps] = useState<AnyRecord[]>([]);
+  const [trustSummary, setTrustSummary] = useState<AnyRecord>({});
+  const [trustIssues, setTrustIssues] = useState<AnyRecord[]>([]);
+  const [releases, setReleases] = useState<AnyRecord[]>([]);
   const [templateForm, setTemplateForm] = useState<AnyRecord>(defaultTemplate);
   const [previewSource, setPreviewSource] = useState('docker.io/library/busybox:latest');
   const [preview, setPreview] = useState<AnyRecord | null>(null);
@@ -47,11 +50,12 @@ export function Governance({ mirrors, api, reloadMirrors, notify }: any) {
   const [policyForm, setPolicyForm] = useState({ id: '', name: '', webhook_url: '', min_severity: 'warning', dedupe_seconds: 1800, quiet_hours: '{"enabled":false}', events: '{"push_failed":true,"rule_degraded":true}', enabled: true });
   const [windowForm, setWindowForm] = useState({ id: '', name: '', timezone: 'Asia/Shanghai', allow_windows: '[{"days":["mon","tue","wed","thu","fri"],"start":"09:00","end":"18:00"}]', freeze_windows: '[]', enabled: true });
   const [bulkForm, setBulkForm] = useState({ operation_type: 'check_rules', sources: '', check_interval_minutes: 30, mode: 'auto_push' });
+  const [restoreForm, setRestoreForm] = useState({ backup_package: '', compose_project: 'mirror-registry-restore-drill', cleanup: true });
 
   const pendingCandidateIds = useMemo(() => candidates.filter((item) => ['new', 'conflict'].includes(item.status)).map((item) => item.id), [candidates]);
 
   async function loadGovernance() {
-    const [summaryRow, issueRows, templateRows, sourceRows, candidateRows, policyRows, windowRows, opRows] = await Promise.all([
+    const [summaryRow, issueRows, templateRows, sourceRows, candidateRows, policyRows, windowRows, opRows, trustRow, trustIssueRows, releaseRows] = await Promise.all([
       api('GET', '/governance/summary'),
       api('GET', '/governance/issues?limit=80'),
       api('GET', '/mirror-rule-templates'),
@@ -60,6 +64,9 @@ export function Governance({ mirrors, api, reloadMirrors, notify }: any) {
       api('GET', '/notification-policies'),
       api('GET', '/push-windows'),
       api('GET', '/bulk-operations?limit=20'),
+      api('GET', '/trust/summary'),
+      api('GET', '/trust/issues?limit=60'),
+      api('GET', '/releases?limit=20'),
     ]);
     setSummary(summaryRow || {});
     setIssues(issueRows || []);
@@ -69,6 +76,9 @@ export function Governance({ mirrors, api, reloadMirrors, notify }: any) {
     setPolicies(policyRows || []);
     setWindows(windowRows || []);
     setBulkOps(opRows || []);
+    setTrustSummary(trustRow || {});
+    setTrustIssues(trustIssueRows || []);
+    setReleases(releaseRows || []);
   }
 
   useEffect(() => {
@@ -152,6 +162,30 @@ export function Governance({ mirrors, api, reloadMirrors, notify }: any) {
     await reloadMirrors();
   }
 
+  async function scanRelease(releaseId: string) {
+    await api('POST', `/releases/${releaseId}/scan`, {});
+  }
+
+  async function bypassRelease(releaseId: string) {
+    const reason = window.prompt('绕过原因', 'manual panel bypass')?.trim();
+    if (!reason) return;
+    await api('POST', `/releases/${releaseId}/bypass`, { reason });
+  }
+
+  async function promoteRelease(release: AnyRecord) {
+    const target = window.prompt('提升目标镜像', release.target_image || '')?.trim();
+    if (!target) return;
+    await api('POST', `/releases/${release.id}/promote`, { target_image: target, confirm: true, reason: 'panel promotion' });
+  }
+
+  async function rollbackRelease(release: AnyRecord) {
+    await api('POST', `/releases/${release.id}/rollback`, { confirm: true, reason: 'panel rollback' });
+  }
+
+  async function createRestoreDrill() {
+    await api('POST', '/restore-drills', restoreForm);
+  }
+
   return (
     <div className="stack governance-page">
       <div className="metric-grid">
@@ -159,6 +193,64 @@ export function Governance({ mirrors, api, reloadMirrors, notify }: any) {
         <Metric label="失败规则" value={summary.failed_rules ?? 0} />
         <Metric label="新发现" value={summary.new_discovery_candidates ?? 0} />
         <Metric label="通知失败" value={summary.notification_failures ?? 0} />
+      </div>
+
+      <div className="metric-grid">
+        <Metric label="可信发布" value={trustSummary.trust?.trusted ?? 0} />
+        <Metric label="风险告警" value={trustSummary.trust?.warning ?? 0} />
+        <Metric label="阻断发布" value={trustSummary.blocked ?? 0} />
+        <Metric label="扫描失败" value={trustSummary.scan_failed ?? 0} />
+      </div>
+
+      <div className="two-col governance-grid">
+        <Panel title="可信发布" action={<button onClick={() => run('已刷新可信发布', loadGovernance)}><RefreshCw size={16} />刷新</button>}>
+          <div className="table-scroll short-table">
+            <table>
+              <thead><tr><th>Release</th><th>镜像</th><th>可信</th><th>扫描</th><th>操作</th></tr></thead>
+              <tbody>
+                {releases.slice(0, 8).map((item) => (
+                  <tr key={item.id}>
+                    <td className="mono">{item.id}</td>
+                    <td className="mono">{item.target_image}</td>
+                    <td><Badge value={item.trust_status} /></td>
+                    <td><Badge value={item.scan_status} /></td>
+                    <td>
+                      <div className="row-actions compact">
+                        <button onClick={() => run('扫描已入队', () => scanRelease(item.id))}><Play size={14} />扫描</button>
+                        <button onClick={() => run('可信状态已绕过', () => bypassRelease(item.id))}><ShieldCheck size={14} />绕过</button>
+                        <button onClick={() => run('提升已入队', () => promoteRelease(item))}><DownloadCloud size={14} />提升</button>
+                        <button onClick={() => run('回滚已入队', () => rollbackRelease(item))}><RotateCcw size={14} />回滚</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!releases.length && <tr><td colSpan={5}>暂无发布记录</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Panel title="发布风险">
+          <div className="activity-list compact-list">
+            {trustIssues.slice(0, 8).map((issue) => (
+              <div className="activity-item" key={issue.id}>
+                <span className="act-icon"><ShieldCheck size={14} /></span>
+                <div>
+                  <div className="act-msg"><strong>{issue.trust_status}</strong> {issue.target_image || issue.id}</div>
+                  <div className="act-time">critical {issue.severity?.critical ?? 0} / high {issue.severity?.high ?? 0}</div>
+                </div>
+                <Badge value={issue.scan_status} />
+              </div>
+            ))}
+            {!trustIssues.length && <p className="sect-desc compact">暂无可信发布风险。</p>}
+          </div>
+          <div className="form-grid">
+            <input value={restoreForm.backup_package} onChange={(event) => setRestoreForm({ ...restoreForm, backup_package: event.target.value })} placeholder="备份包路径" />
+            <input value={restoreForm.compose_project} onChange={(event) => setRestoreForm({ ...restoreForm, compose_project: event.target.value })} placeholder="演练项目名" />
+            <label className="inline-check"><input type="checkbox" checked={restoreForm.cleanup} onChange={(event) => setRestoreForm({ ...restoreForm, cleanup: event.target.checked })} />清理演练环境</label>
+            <button className="primary" onClick={() => run('恢复演练已创建', createRestoreDrill)}><RotateCcw size={16} />恢复演练</button>
+          </div>
+        </Panel>
       </div>
 
       <div className="two-col governance-grid">

@@ -845,6 +845,107 @@ def test_ops_agent_high_risk_confirmation_and_stale_recovery(panel_app):
     assert requeued["status"] == "queued"
 
 
+def test_release_trust_api_scan_bypass_promote_rollback_and_restore_drill(panel_app):
+    client, _, _, _ = panel_app
+
+    import panel.main as panel_main
+
+    now = panel_main.now_iso()
+    release_id = "rel-testphase4"
+    panel_main.db_execute(
+        """
+        INSERT INTO mirror_releases(
+            id, mirror_source, source_image, target_image, source_digest, target_digest,
+            target_repo, target_tag, rule_snapshot_json, policy_snapshot_json, release_type,
+            trust_status, scan_status, severity_critical, severity_high, metadata_path,
+            signature_status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            release_id,
+            "docker.io/library/busybox:latest",
+            "docker.io/library/busybox:latest",
+            "localhost:5000/library/busybox:stable",
+            "sha256:source",
+            "sha256:target",
+            "library/busybox",
+            "stable",
+            '{"mode":"auto_push"}',
+            "{}",
+            "mirror_push",
+            "blocked",
+            "succeeded",
+            1,
+            0,
+            f"releases/{release_id}/metadata.json",
+            "skipped",
+            now,
+            now,
+        ),
+    )
+    panel_main.db_execute(
+        """
+        INSERT INTO release_events(release_id, type, status, message, detail_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (release_id, "created", "succeeded", "release created", "{}", now),
+    )
+
+    listed = client.get("/api/releases").json()
+    assert listed[0]["id"] == release_id
+    assert listed[0]["trust_status"] == "blocked"
+    assert listed[0]["severity"]["critical"] == 1
+
+    detail = client.get(f"/api/releases/{release_id}").json()
+    assert detail["rule_snapshot"]["mode"] == "auto_push"
+    assert client.get(f"/api/releases/{release_id}/events").json()[0]["type"] == "created"
+    summary = client.get("/api/trust/summary").json()
+    assert summary["blocked"] == 1
+    assert client.get("/api/trust/issues?severity=critical").json()[0]["id"] == release_id
+
+    scan = client.post(f"/api/releases/{release_id}/scan")
+    assert scan.status_code == 200
+    assert scan.json()["queue"]["task_type"] == "scan"
+    assert scan.json()["release"]["scan_status"] == "queued"
+    scan_tasks = client.get(f"/api/scan-tasks?release_id={release_id}").json()
+    assert scan_tasks[0]["status"] == "queued"
+    cancel = client.post(f"/api/scan-tasks/{scan_tasks[0]['id']}/cancel").json()
+    assert cancel["task"]["status"] == "canceled"
+
+    blocked_promote = client.post(f"/api/releases/{release_id}/promote", json={"target_image": "registry.example.com/prod/busybox:stable"})
+    assert blocked_promote.status_code == 409
+
+    bypass = client.post(f"/api/releases/{release_id}/bypass", json={"reason": "accepted for emergency rollout"}).json()
+    assert bypass["release"]["trust_status"] == "bypassed"
+
+    needs_confirm = client.post(f"/api/releases/{release_id}/promote", json={"target_image": "registry.example.com/prod/busybox:stable"})
+    assert needs_confirm.status_code == 409
+    promoted = client.post(
+        f"/api/releases/{release_id}/promote",
+        json={"target_image": "registry.example.com/prod/busybox:stable", "confirm": True, "reason": "manual approval"},
+    ).json()
+    assert promoted["queue"]["task_type"] == "promote"
+    assert promoted["queue"]["mirror_target"] == "registry.example.com/prod/busybox:stable"
+
+    rollback = client.post(f"/api/releases/{release_id}/rollback", json={"confirm": True, "reason": "restore stable"}).json()
+    assert rollback["queue"]["task_type"] == "rollback"
+    assert rollback["queue"]["mirror_target"] == "localhost:5000/library/busybox:stable"
+
+    drill = client.post("/api/restore-drills", json={"backup_package": "", "compose_project": "drill-test", "cleanup": True}).json()["drill"]
+    assert drill["status"] == "queued"
+    assert drill["scope"]["compose_project"] == "drill-test"
+    task = panel_main.db_one("SELECT action, params_json FROM ops_tasks WHERE id = ?", (drill["ops_task_id"],))
+    assert task["action"] == "restore_drill"
+    assert json.loads(task["params_json"])["compose_project"] == "drill-test"
+
+    event_types = [row["type"] for row in panel_main.db_rows("SELECT type FROM release_events WHERE release_id = ? ORDER BY id", (release_id,))]
+    assert "scan_queued" in event_types
+    assert "bypassed" in event_types
+    assert "promoted" in event_types
+    assert "rollback_started" in event_types
+
+
 def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
     client, config_path, _, _ = panel_app
     create = client.post(
@@ -1051,7 +1152,8 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert "sync_queue" in tables
         assert "api_tokens" not in tables
         versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2", "0005_governance_phase3"]
+        expected_versions = ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2", "0005_governance_phase3", "0006_trust_rollback_phase4"]
+        assert versions == expected_versions
         mirror_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mirrors)")}
         queue_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_queue)")}
         assert {"mode", "next_check_at", "pending_push_digest", "allow_latest_push"} <= mirror_columns
@@ -1060,10 +1162,11 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert "mirror_events" in tables
         assert {"ops_agents", "ops_tasks", "ops_task_events"} <= tables
         assert {"mirror_rule_templates", "discovery_sources", "discovery_candidates", "notification_policies", "push_windows", "bulk_operations"} <= tables
+        assert {"mirror_releases", "image_scan_tasks", "release_events", "promotion_policies", "restore_drills"} <= tables
 
         panel_db.init_db(conn)
         repeat_versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2", "0005_governance_phase3"]
+        assert repeat_versions == expected_versions
 
     old_db_path = tmp_path / "old.db"
     with sqlite3.connect(old_db_path) as conn:
@@ -1096,8 +1199,10 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0003_mirror_monitoring_phase1'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0004_ops_agent_phase2'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0005_governance_phase3'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0006_trust_rollback_phase4'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM ops_tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM restore_drills").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'api_tokens'").fetchone()[0] == 0
         migrated = conn.execute("SELECT mode, next_check_at, last_source_digest FROM mirrors WHERE source = ?", ("docker.io/library/busybox:latest",)).fetchone()
         assert migrated["mode"] == "auto_push"

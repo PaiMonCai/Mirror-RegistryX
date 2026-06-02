@@ -23,6 +23,17 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from mirror_registry_core.config import default_config
 from mirror_registry_core.governance import evaluate_push_window
+from mirror_registry_core.trust import (
+    build_trivy_sbom_command,
+    build_trivy_scan_command,
+    compute_trust_status,
+    image_ref_for_digest,
+    json_dumps as trust_json_dumps,
+    parse_trivy_summary,
+    release_id as new_release_id,
+    safe_release_artifact_dir,
+    target_repo_tag,
+)
 from mirror_registry_core.mirror_rules import (
     add_minutes,
     bool_int,
@@ -68,6 +79,7 @@ LOCAL_REGISTRY_ALIASES = [
 WORKER_ID = os.getenv("WORKER_ID", "local-sync").strip() or "local-sync"
 WORKER_NAME = os.getenv("WORKER_NAME", "Local Sync Worker").strip() or "Local Sync Worker"
 WORKER_LABELS = [item.strip() for item in os.getenv("WORKER_LABELS", "local,sync").split(",") if item.strip()]
+ARTIFACT_ROOT = Path(os.getenv("ARTIFACT_ROOT", "/data/artifacts"))
 
 
 def database_backend(database_url: str = DATABASE_URL) -> str:
@@ -299,6 +311,72 @@ CREATE TABLE IF NOT EXISTS push_windows (
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mirror_releases (
+    id TEXT PRIMARY KEY,
+    mirror_source TEXT NOT NULL,
+    source_image TEXT NOT NULL,
+    target_image TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    target_digest TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    target_tag TEXT NOT NULL,
+    rule_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    policy_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    push_run_id INTEGER,
+    push_event_id INTEGER,
+    parent_release_id TEXT,
+    release_type TEXT NOT NULL DEFAULT 'mirror_push',
+    trust_status TEXT NOT NULL DEFAULT 'unknown',
+    scan_status TEXT NOT NULL DEFAULT 'not_scanned',
+    scanner TEXT,
+    scanner_version TEXT,
+    severity_critical INTEGER NOT NULL DEFAULT 0,
+    severity_high INTEGER NOT NULL DEFAULT 0,
+    severity_medium INTEGER NOT NULL DEFAULT 0,
+    severity_low INTEGER NOT NULL DEFAULT 0,
+    severity_unknown INTEGER NOT NULL DEFAULT 0,
+    scan_report_path TEXT,
+    sbom_path TEXT,
+    metadata_path TEXT,
+    signature_status TEXT NOT NULL DEFAULT 'skipped',
+    signature_subject TEXT,
+    signature_issuer TEXT,
+    signature_checked_at TEXT,
+    bypass_reason TEXT,
+    bypassed_by TEXT,
+    bypassed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_scan_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id TEXT NOT NULL,
+    image_ref TEXT NOT NULL,
+    scanner TEXT NOT NULL DEFAULT 'trivy',
+    status TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+    exit_code INTEGER,
+    message TEXT,
+    log_tail TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS release_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT,
+    message TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 """
 
@@ -536,6 +614,75 @@ POSTGRES_SCHEMA_STATEMENTS = [
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mirror_releases (
+        id VARCHAR(96) PRIMARY KEY,
+        mirror_source VARCHAR(255) NOT NULL,
+        source_image VARCHAR(255) NOT NULL,
+        target_image VARCHAR(255) NOT NULL,
+        source_digest TEXT NOT NULL,
+        target_digest TEXT NOT NULL,
+        target_repo VARCHAR(255) NOT NULL,
+        target_tag VARCHAR(128) NOT NULL,
+        rule_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        policy_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        push_run_id INTEGER,
+        push_event_id INTEGER,
+        parent_release_id VARCHAR(96),
+        release_type VARCHAR(32) NOT NULL DEFAULT 'mirror_push',
+        trust_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
+        scan_status VARCHAR(32) NOT NULL DEFAULT 'not_scanned',
+        scanner VARCHAR(32),
+        scanner_version VARCHAR(64),
+        severity_critical INTEGER NOT NULL DEFAULT 0,
+        severity_high INTEGER NOT NULL DEFAULT 0,
+        severity_medium INTEGER NOT NULL DEFAULT 0,
+        severity_low INTEGER NOT NULL DEFAULT 0,
+        severity_unknown INTEGER NOT NULL DEFAULT 0,
+        scan_report_path TEXT,
+        sbom_path TEXT,
+        metadata_path TEXT,
+        signature_status VARCHAR(32) NOT NULL DEFAULT 'skipped',
+        signature_subject TEXT,
+        signature_issuer TEXT,
+        signature_checked_at VARCHAR(64),
+        bypass_reason TEXT,
+        bypassed_by VARCHAR(120),
+        bypassed_at VARCHAR(64),
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS image_scan_tasks (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        release_id VARCHAR(96) NOT NULL,
+        image_ref TEXT NOT NULL,
+        scanner VARCHAR(32) NOT NULL DEFAULT 'trivy',
+        status VARCHAR(32) NOT NULL,
+        scheduled_at VARCHAR(64) NOT NULL,
+        started_at VARCHAR(64),
+        finished_at VARCHAR(64),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+        exit_code INTEGER,
+        message TEXT,
+        log_tail TEXT,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS release_events (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        release_id VARCHAR(96) NOT NULL,
+        type VARCHAR(64) NOT NULL,
+        status VARCHAR(32),
+        message TEXT,
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        created_at VARCHAR(64) NOT NULL
     )
     """,
 ]
@@ -897,7 +1044,7 @@ def enqueue_sync_queue_task(
     clean_reason = reason.strip() or "manual"
     clean_sources = clean_queue_sources(source=source, sources=sources)
     clean_task_type = task_type.strip().lower() if task_type else "sync"
-    if clean_task_type not in {"sync", "check", "push"}:
+    if clean_task_type not in {"sync", "check", "push", "scan", "promote", "rollback"}:
         clean_task_type = "sync"
     dedupe_key = queue_dedupe_key(f"{clean_task_type}:{clean_reason}:{digest}", clean_sources)
     if not force:
@@ -1174,6 +1321,119 @@ def record_mirror_event(mirror_id: str, event_type: str, status: str, old_digest
         """,
         (mirror_id, event_type, status, old_digest, new_digest, message, json.dumps(detail or {}, ensure_ascii=False), now_iso()),
     )
+
+
+def record_release_event(release_id: str, event_type: str, status: str = "", message: str = "", detail: dict | None = None) -> int:
+    return db_write(
+        """
+        INSERT INTO release_events(release_id, type, status, message, detail_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (release_id, event_type, status, message, json.dumps(detail or {}, ensure_ascii=False), now_iso()),
+    )
+
+
+def release_row(release_id: str) -> dict | None:
+    return db_one("SELECT * FROM mirror_releases WHERE id = ?", (release_id,))
+
+
+def create_mirror_release(
+    rule: dict,
+    source_digest: str,
+    target_digest: str,
+    *,
+    run_id: int | None = None,
+    parent_release_id: str = "",
+    release_type: str = "mirror_push",
+) -> dict:
+    rid = new_release_id()
+    repo, tag = target_repo_tag(rule["target"])
+    now = now_iso()
+    snapshot = {
+        "source": rule["source"],
+        "target": rule["target"],
+        "mode": rule.get("mode"),
+        "environment": rule.get("environment"),
+        "push_window_id": rule.get("push_window_id") or "",
+        "template_id": rule.get("template_id") or "",
+    }
+    metadata_rel = f"releases/{rid}/metadata.json"
+    db_write(
+        """
+        INSERT INTO mirror_releases(
+            id, mirror_source, source_image, target_image, source_digest, target_digest,
+            target_repo, target_tag, rule_snapshot_json, policy_snapshot_json, push_run_id,
+            parent_release_id, release_type, trust_status, scan_status, metadata_path,
+            signature_status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 'not_scanned', ?, 'skipped', ?, ?)
+        """,
+        (
+            rid,
+            rule["source"],
+            rule["source"],
+            rule["target"],
+            source_digest,
+            target_digest,
+            repo,
+            tag,
+            json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+            "{}",
+            run_id,
+            parent_release_id or None,
+            release_type,
+            metadata_rel,
+            now,
+            now,
+        ),
+    )
+    release = release_row(rid) or {}
+    write_release_metadata(release)
+    record_release_event(rid, "created", "succeeded", f"{release_type} release created", {"target": rule["target"], "digest": target_digest})
+    enqueue_scan_task(rid)
+    return release_row(rid) or release
+
+
+def write_release_metadata(row: dict) -> None:
+    if not row:
+        return
+    release_dir = safe_release_artifact_dir(ARTIFACT_ROOT, row["id"])
+    release_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "id": row["id"],
+        "mirror_source": row["mirror_source"],
+        "target_image": row["target_image"],
+        "source_digest": row["source_digest"],
+        "target_digest": row["target_digest"],
+        "release_type": row["release_type"],
+        "created_at": row["created_at"],
+    }
+    (release_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def enqueue_scan_task(release_id: str, force: bool = False) -> dict | None:
+    release = release_row(release_id)
+    if not release:
+        return None
+    active = db_one(
+        "SELECT id FROM image_scan_tasks WHERE release_id = ? AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1",
+        (release_id,),
+    )
+    if active and not force:
+        return active
+    image_ref = image_ref_for_digest(release["target_image"], release["target_digest"])
+    now = now_iso()
+    task_id = db_write(
+        """
+        INSERT INTO image_scan_tasks(release_id, image_ref, scanner, status, scheduled_at, created_at, updated_at)
+        VALUES (?, ?, 'trivy', 'queued', ?, ?, ?)
+        """,
+        (release_id, image_ref, now, now, now),
+    )
+    db_write("UPDATE mirror_releases SET scan_status = 'queued', trust_status = 'scanning', scanner = 'trivy', updated_at = ? WHERE id = ?", (now, release_id))
+    enqueue_sync_queue_task(f"release-scan:{release_id}", source=release["mirror_source"], priority=70, task_type="scan", digest=release_id, force=force)
+    record_release_event(release_id, "scan_queued", "queued", "scan task queued", {"scan_task_id": task_id})
+    return db_one("SELECT * FROM image_scan_tasks WHERE id = ?", (task_id,))
 
 
 def check_backoff_minutes(failures: int) -> int:
@@ -2292,6 +2552,8 @@ def process_mirror_push_task(row: dict, queue_id: int) -> dict:
             audit_log("copy_success", "mirror", runtime_rule["source"], {"target": runtime_rule["target"], "copy_target": copy_target, "digest": digest})
             audit_log("tag_written", "image", f"{target_repo}:{target_tag}", {"source": runtime_rule["source"], "target": runtime_rule["target"], "copy_target": copy_target, "digest": digest, "run_id": run_id})
             record_mirror_event(runtime_rule["source"], "push_succeeded", "succeeded", new_digest=digest, message="push succeeded", detail={"copy_target": copy_target})
+            release = create_mirror_release(runtime_rule, digest, target_digest, run_id=run_id)
+            record_mirror_event(runtime_rule["source"], "release_created", "succeeded", new_digest=target_digest, message="release created", detail={"release_id": release.get("id")})
             update_run_item(item_id, "success", new_digest=digest, step="copy", copy_target=copy_target, started_at_monotonic=started_at)
             update_run(run_id, "completed", 1, 1, 0, 0, "push succeeded")
             return {"status": "completed", "run_id": run_id, "message": "push succeeded"}
@@ -2320,6 +2582,153 @@ def process_mirror_push_task(row: dict, queue_id: int) -> dict:
         return {"status": "failed", "run_id": run_id, "message": copy_error}
     finally:
         remove_temp_authfile(authfile)
+
+
+def load_scan_task_for_release(release_id: str) -> dict | None:
+    return db_one(
+        """
+        SELECT * FROM image_scan_tasks
+        WHERE release_id = ? AND status IN ('queued', 'running')
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (release_id,),
+    )
+
+
+def update_release_scan_result(release_id: str, scan_status: str, counts: dict[str, int], scan_report_path: str = "", sbom_path: str = "", scanner_version: str = "") -> None:
+    trust_status = compute_trust_status(scan_status, counts)
+    now = now_iso()
+    db_write(
+        """
+        UPDATE mirror_releases
+        SET scan_status = ?, trust_status = ?, scanner = 'trivy', scanner_version = ?,
+            severity_critical = ?, severity_high = ?, severity_medium = ?, severity_low = ?,
+            severity_unknown = ?, scan_report_path = COALESCE(NULLIF(?, ''), scan_report_path),
+            sbom_path = COALESCE(NULLIF(?, ''), sbom_path), updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            scan_status,
+            trust_status,
+            scanner_version,
+            int(counts.get("critical") or 0),
+            int(counts.get("high") or 0),
+            int(counts.get("medium") or 0),
+            int(counts.get("low") or 0),
+            int(counts.get("unknown") or 0),
+            scan_report_path,
+            sbom_path,
+            now,
+            release_id,
+        ),
+    )
+    record_release_event(release_id, trust_status if trust_status in {"trusted", "blocked"} else "scan_succeeded", trust_status, f"trust status {trust_status}", counts)
+
+
+def process_scan_task(row: dict, queue_id: int) -> dict:
+    release_id = str(row.get("digest") or "").strip()
+    if not release_id:
+        reason = str(row.get("reason") or "")
+        if reason.startswith("release-scan:"):
+            release_id = reason.split(":", 1)[1]
+    release = release_row(release_id)
+    if not release:
+        raise ValueError(f"release not found: {release_id}")
+    task = load_scan_task_for_release(release_id) or enqueue_scan_task(release_id, force=True)
+    if not task:
+        raise ValueError(f"scan task not available: {release_id}")
+    task_id = int(task["id"])
+    started = now_iso()
+    db_write("UPDATE image_scan_tasks SET status = 'running', started_at = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?", (started, started, task_id))
+    db_write("UPDATE mirror_releases SET scan_status = 'running', trust_status = 'scanning', updated_at = ? WHERE id = ?", (started, release_id))
+    record_release_event(release_id, "scan_started", "running", "trivy scan started", {"scan_task_id": task_id})
+    release_dir = safe_release_artifact_dir(ARTIFACT_ROOT, release_id)
+    release_dir.mkdir(parents=True, exist_ok=True)
+    scan_path = release_dir / "scan.json"
+    sbom_path = release_dir / "sbom.cdx.json"
+    image_ref = image_ref_for_digest(release["target_image"], release["target_digest"])
+    scan_cmd = build_trivy_scan_command(image_ref, scan_path)
+    sbom_cmd = build_trivy_sbom_command(image_ref, sbom_path)
+    scan_ok, scan_log = run_command("trivy scan", scan_cmd, timeout=int(task.get("timeout_seconds") or 1800))
+    finished = now_iso()
+    if not scan_ok:
+        message = scan_log or "trivy scan failed"
+        db_write(
+            "UPDATE image_scan_tasks SET status = 'failed', finished_at = ?, exit_code = ?, message = ?, log_tail = ?, updated_at = ? WHERE id = ?",
+            (finished, 1, message, message[-20000:], finished, task_id),
+        )
+        update_release_scan_result(release_id, "failed", {})
+        record_release_event(release_id, "scan_failed", "failed", message, {"command": scan_cmd})
+        return {"status": "failed", "run_id": None, "message": message}
+    try:
+        report = json.loads(scan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        message = f"scan report parse failed: {exc}"
+        db_write(
+            "UPDATE image_scan_tasks SET status = 'failed', finished_at = ?, exit_code = ?, message = ?, log_tail = ?, updated_at = ? WHERE id = ?",
+            (finished, 1, message, message, finished, task_id),
+        )
+        update_release_scan_result(release_id, "failed", {})
+        record_release_event(release_id, "scan_failed", "failed", message)
+        return {"status": "failed", "run_id": None, "message": message}
+    counts = parse_trivy_summary(report)
+    sbom_ok, sbom_log = run_command("trivy sbom", sbom_cmd, timeout=int(task.get("timeout_seconds") or 1800))
+    if not sbom_ok and not sbom_path.exists():
+        sbom_path.write_text(json.dumps({"error": sbom_log or "sbom generation failed"}, ensure_ascii=False), encoding="utf-8")
+    db_write(
+        "UPDATE image_scan_tasks SET status = 'succeeded', finished_at = ?, exit_code = 0, message = ?, log_tail = ?, updated_at = ? WHERE id = ?",
+        (finished, "scan succeeded", (scan_log + "\n" + sbom_log)[-20000:], finished, task_id),
+    )
+    update_release_scan_result(release_id, "succeeded", counts, f"releases/{release_id}/scan.json", f"releases/{release_id}/sbom.cdx.json")
+    record_release_event(release_id, "scan_succeeded", "succeeded", "scan succeeded", counts)
+    return {"status": "completed", "run_id": None, "message": "scan succeeded"}
+
+
+def release_to_runtime_rule(release: dict, target_image: str | None = None) -> dict:
+    return {
+        "source": release["target_image"],
+        "target": target_image or release["target_image"],
+        "environment": "local",
+        "source_credential_id": "",
+        "target_credential_id": "",
+    }
+
+
+def create_derived_release(parent: dict, target_image: str, release_type: str, run_id: int | None = None) -> dict:
+    rule = {
+        "source": parent["source_image"],
+        "target": target_image,
+        "mode": "auto_push",
+        "environment": "local",
+    }
+    return create_mirror_release(rule, parent["source_digest"], parent["target_digest"], run_id=run_id, parent_release_id=parent["id"], release_type=release_type)
+
+
+def process_release_copy_task(row: dict, queue_id: int, release_type: str) -> dict:
+    release_id = str(row.get("digest") or "").strip()
+    release = release_row(release_id)
+    if not release:
+        raise ValueError(f"release not found: {release_id}")
+    target_image = str(row.get("mirror_target") or release["target_image"]).strip()
+    copy_source = image_ref_for_digest(release["target_image"], release["target_digest"])
+    run_id = create_run(f"release-{release_type}:{release_id}", release["mirror_source"])
+    attach_sync_queue_run(queue_id, run_id)
+    item_id = create_run_item(run_id, copy_source, target_image, release["target_digest"])
+    started_at = time.monotonic()
+    ok, copy_target, error = copy_image(copy_source, target_image, retry_count=0)
+    if ok:
+        child = create_derived_release(release, target_image, release_type, run_id=run_id)
+        event_type = "promoted" if release_type == "promotion" else "rollback_succeeded"
+        record_release_event(release_id, event_type, "succeeded", f"{release_type} copied", {"target_image": target_image, "child_release_id": child.get("id")})
+        update_run_item(item_id, "success", new_digest=release["target_digest"], step="copy", copy_target=copy_target, started_at_monotonic=started_at)
+        update_run(run_id, "completed", 1, 1, 0, 0, f"{release_type} succeeded")
+        return {"status": "completed", "run_id": run_id, "message": f"{release_type} succeeded"}
+    event_type = "rollback_failed" if release_type == "rollback" else "promotion_failed"
+    record_release_event(release_id, event_type, "failed", error, {"target_image": target_image})
+    update_run_item(item_id, "failed", new_digest=release["target_digest"], step="copy", error=error, copy_target=copy_target, started_at_monotonic=started_at)
+    update_run(run_id, "failed", 1, 0, 0, 1, error)
+    return {"status": "failed", "run_id": run_id, "message": error}
 
 
 def process_scheduled_policy(policy: dict, retry_count: int, queue_id: int | None = None, webhook_url: str = "") -> dict:
@@ -2516,6 +2925,21 @@ def process_sync_queue_task(row: dict) -> bool:
             result_run_id = result.get("run_id")
         elif task_type == "push":
             result = process_mirror_push_task(current, queue_id)
+            final_status = "completed" if result.get("status") == "completed" else "failed"
+            message = str(result.get("message") or final_status)
+            result_run_id = result.get("run_id")
+        elif task_type == "scan":
+            result = process_scan_task(current, queue_id)
+            final_status = "completed" if result.get("status") == "completed" else "failed"
+            message = str(result.get("message") or final_status)
+            result_run_id = result.get("run_id")
+        elif task_type == "promote":
+            result = process_release_copy_task(current, queue_id, "promotion")
+            final_status = "completed" if result.get("status") == "completed" else "failed"
+            message = str(result.get("message") or final_status)
+            result_run_id = result.get("run_id")
+        elif task_type == "rollback":
+            result = process_release_copy_task(current, queue_id, "rollback")
             final_status = "completed" if result.get("status") == "completed" else "failed"
             message = str(result.get("message") or final_status)
             result_run_id = result.get("run_id")

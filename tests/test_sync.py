@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from mirror_registry_core.trust import compute_trust_status, parse_trivy_summary
+
 
 def test_state_round_trip_is_atomic(tmp_path, monkeypatch):
     state_path = tmp_path / "data" / "sync-state.json"
@@ -627,6 +629,7 @@ def test_mirror_push_success_updates_rule_and_state(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
     monkeypatch.setenv("STATE_PATH", str(tmp_path / "data" / "sync-state.json"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
 
     import sync.sync as sync_main
 
@@ -662,6 +665,9 @@ def test_mirror_push_success_updates_rule_and_state(tmp_path, monkeypatch):
     state = json.loads((tmp_path / "data" / "sync-state.json").read_text(encoding="utf-8"))
     queue = sync_main.sync_queue_row(task["id"])
     event = sync_main.db_one("SELECT type, status, new_digest FROM mirror_events WHERE type = 'push_succeeded'")
+    release = sync_main.db_one("SELECT * FROM mirror_releases WHERE mirror_source = ?", ("docker.io/library/busybox:latest",))
+    scan = sync_main.db_one("SELECT * FROM image_scan_tasks WHERE release_id = ?", (release["id"],))
+    release_scan_queue = sync_main.db_one("SELECT task_type, status, digest FROM sync_queue WHERE task_type = 'scan'")
     assert queue["status"] == "completed"
     assert inspected == ["localhost:5000/library/busybox:stable"]
     assert rule["last_digest"] == "sha256:new"
@@ -671,6 +677,137 @@ def test_mirror_push_success_updates_rule_and_state(tmp_path, monkeypatch):
     assert rule["push_status"] == "succeeded"
     assert state["docker.io/library/busybox:latest"] == "sha256:new"
     assert event == {"type": "push_succeeded", "status": "succeeded", "new_digest": "sha256:new"}
+    assert release["source_digest"] == "sha256:new"
+    assert release["target_digest"] == "sha256:target"
+    assert release["trust_status"] == "scanning"
+    assert release["scan_status"] == "queued"
+    assert (tmp_path / "artifacts" / "releases" / release["id"] / "metadata.json").is_file()
+    assert scan["status"] == "queued"
+    assert scan["image_ref"] == "localhost:5000/library/busybox@sha256:target"
+    assert release_scan_queue == {"task_type": "scan", "status": "queued", "digest": release["id"]}
+
+
+def test_trivy_summary_and_scan_task_update_release_trust(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    report = {
+        "Results": [
+            {
+                "Vulnerabilities": [
+                    {"Severity": "CRITICAL"},
+                    {"Severity": "HIGH"},
+                    {"Severity": "medium"},
+                    {"Severity": "unexpected"},
+                ]
+            }
+        ]
+    }
+    counts = parse_trivy_summary(report)
+    assert counts == {"critical": 1, "high": 1, "medium": 1, "low": 0, "unknown": 1}
+    assert compute_trust_status("succeeded", {"critical": 0, "high": 0}) == "trusted"
+    assert compute_trust_status("succeeded", {"critical": 0, "high": 1}) == "warning"
+    assert compute_trust_status("succeeded", {"critical": 1}) == "blocked"
+    assert compute_trust_status("failed", {}) == "scan_failed"
+
+    release = sync_main.create_mirror_release(
+        {
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:stable",
+            "mode": "auto_push",
+            "environment": "local",
+        },
+        "sha256:source",
+        "sha256:target",
+    )
+    queue = sync_main.db_one("SELECT * FROM sync_queue WHERE task_type = 'scan' AND digest = ?", (release["id"],))
+
+    def fake_run_command(step_name, cmd, timeout=900):
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        if step_name == "trivy scan":
+            output_path.write_text(json.dumps(report), encoding="utf-8")
+        else:
+            output_path.write_text(json.dumps({"bomFormat": "CycloneDX"}), encoding="utf-8")
+        return True, f"{step_name} ok"
+
+    monkeypatch.setattr(sync_main, "run_command", fake_run_command)
+
+    assert sync_main.process_sync_queue_task(queue) is True
+
+    updated = sync_main.release_row(release["id"])
+    scan = sync_main.db_one("SELECT * FROM image_scan_tasks WHERE release_id = ?", (release["id"],))
+    events = [row["type"] for row in sync_main.db_rows("SELECT type FROM release_events WHERE release_id = ? ORDER BY id", (release["id"],))]
+    assert updated["scan_status"] == "succeeded"
+    assert updated["trust_status"] == "blocked"
+    assert updated["severity_critical"] == 1
+    assert updated["severity_high"] == 1
+    assert updated["scan_report_path"] == f"releases/{release['id']}/scan.json"
+    assert updated["sbom_path"] == f"releases/{release['id']}/sbom.cdx.json"
+    assert scan["status"] == "succeeded"
+    assert "scan_started" in events
+    assert "blocked" in events
+
+
+def test_release_promotion_and_rollback_tasks_create_derived_releases(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    release = sync_main.create_mirror_release(
+        {
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:stable",
+            "mode": "auto_push",
+            "environment": "local",
+        },
+        "sha256:source",
+        "sha256:target",
+    )
+    sync_main.db_write("UPDATE mirror_releases SET trust_status = 'trusted', scan_status = 'succeeded' WHERE id = ?", (release["id"],))
+    copies = []
+    monkeypatch.setattr(sync_main, "copy_image", lambda source, target, retry_count=0, authfile="": copies.append((source, target)) or (True, target, ""))
+
+    promote = sync_main.enqueue_sync_queue_task(
+        f"release-promote:{release['id']}",
+        source=release["mirror_source"],
+        priority=55,
+        task_type="promote",
+        mirror_target="registry.example.com/promoted/busybox:stable",
+        digest=release["id"],
+        force=True,
+    )
+    rollback = sync_main.enqueue_sync_queue_task(
+        f"release-rollback:{release['id']}",
+        source=release["mirror_source"],
+        priority=55,
+        task_type="rollback",
+        mirror_target=release["target_image"],
+        digest=release["id"],
+        force=True,
+    )
+
+    assert sync_main.process_sync_queue_task(sync_main.sync_queue_row(promote["id"])) is True
+    assert sync_main.process_sync_queue_task(sync_main.sync_queue_row(rollback["id"])) is True
+
+    children = sync_main.db_rows("SELECT release_type, parent_release_id, target_image FROM mirror_releases WHERE parent_release_id = ? ORDER BY release_type", (release["id"],))
+    events = [row["type"] for row in sync_main.db_rows("SELECT type FROM release_events WHERE release_id = ? ORDER BY id", (release["id"],))]
+    assert copies == [
+        ("localhost:5000/library/busybox@sha256:target", "registry.example.com/promoted/busybox:stable"),
+        ("localhost:5000/library/busybox@sha256:target", "localhost:5000/library/busybox:stable"),
+    ]
+    assert children == [
+        {"release_type": "promotion", "parent_release_id": release["id"], "target_image": "registry.example.com/promoted/busybox:stable"},
+        {"release_type": "rollback", "parent_release_id": release["id"], "target_image": "localhost:5000/library/busybox:stable"},
+    ]
+    assert "promoted" in events
+    assert "rollback_succeeded" in events
 
 
 def test_mirror_push_failure_preserves_pending_digest_and_retries(tmp_path, monkeypatch):
