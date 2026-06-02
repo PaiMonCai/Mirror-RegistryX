@@ -203,6 +203,10 @@ def test_notify_webhook_deduplicates_repeated_events(tmp_path, monkeypatch):
     sync_main.notify_webhook("sync_failed", {"failed": 1})
 
     assert len(calls) == 1
+    body = json.loads(calls[0][1].decode("utf-8"))
+    assert body["msg_type"] == "text"
+    assert "Mirror Registry - 同步失败" in body["content"]["text"]
+    assert '"failed": 1' in body["content"]["text"]
     assert sync_main.runtime_value("notify_last_sent_event") == "sync_failed"
     assert sync_main.runtime_value("notify_last_suppressed_event") == "sync_failed"
 
@@ -211,6 +215,34 @@ def test_notify_webhook_deduplicates_repeated_events(tmp_path, monkeypatch):
     sync_main.notify_webhook("sync_failed", {"failed": 1})
 
     assert len(calls) == 2
+
+
+def test_notify_webhook_failure_records_error_without_dedupe(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "http://notify.local/hook")
+    monkeypatch.setenv("NOTIFY_DEDUPE_SECONDS", "1800")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    calls = []
+
+    def fake_urlopen(request, timeout=5):
+        calls.append((request.full_url, request.data, timeout))
+        raise sync_main.urllib.error.URLError("network down")
+
+    monkeypatch.setattr(sync_main.urllib.request, "urlopen", fake_urlopen)
+
+    sync_main.notify_webhook("sync_failed", {"failed": 1})
+    sync_main.notify_webhook("sync_failed", {"failed": 1})
+
+    assert len(calls) == 2
+    assert sync_main.runtime_value("notify_last_sent_event") == ""
+    assert sync_main.runtime_value("notify_last_error_event") == "sync_failed"
+    assert "network down" in sync_main.runtime_value("notify_last_error")
+    state_key = f"notify_last_{sync_main.webhook_dedupe_key('sync_failed')}"
+    assert sync_main.runtime_value(state_key) == ""
 
 
 def test_notify_webhook_deduplicates_by_update_context(tmp_path, monkeypatch):
@@ -239,18 +271,22 @@ def test_notify_webhook_deduplicates_by_update_context(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sync_main.urllib.request, "urlopen", fake_urlopen)
 
-    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:a"})
-    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:a"})
-    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/nginx:latest", "target": "localhost:5000/library/nginx:latest", "new_digest": "sha256:a"})
-    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:b"})
+    busybox_a = {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:a"}
+    busybox_b = {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:b"}
+    nginx_a = {"source": "docker.io/library/nginx:latest", "target": "localhost:5000/library/nginx:latest", "new_digest": "sha256:a"}
+
+    sync_main.notify_webhook("mirror_update_detected", busybox_a)
+    sync_main.notify_webhook("mirror_update_detected", busybox_a)
+    sync_main.notify_webhook("mirror_update_detected", nginx_a)
+    sync_main.notify_webhook("mirror_update_detected", busybox_b)
 
     assert len(calls) == 3
-    assert [call["payload"]["source"] for call in calls] == [
-        "docker.io/library/busybox:latest",
-        "docker.io/library/nginx:latest",
-        "docker.io/library/busybox:latest",
-    ]
-    assert sync_main.webhook_dedupe_key("mirror_update_detected", calls[0]["payload"]) != sync_main.webhook_dedupe_key("mirror_update_detected", calls[1]["payload"])
+    texts = [call["content"]["text"] for call in calls]
+    assert all(call["msg_type"] == "text" for call in calls)
+    assert "Source: docker.io/library/busybox:latest" in texts[0]
+    assert "Source: docker.io/library/nginx:latest" in texts[1]
+    assert "New digest: sha256:b" in texts[2]
+    assert sync_main.webhook_dedupe_key("mirror_update_detected", busybox_a) != sync_main.webhook_dedupe_key("mirror_update_detected", nginx_a)
 
 
 def test_parse_trigger_accepts_multiple_sources(tmp_path, monkeypatch):
@@ -535,16 +571,14 @@ def test_sync_sends_update_detected_notification_on_digest_change(tmp_path, monk
     assert result == "updated"
     assert len(calls) == 1
     body = calls[0]
-    assert body["event"] == "mirror_update_detected"
-    assert body["payload"] == {
-        "source": "docker.io/library/busybox:latest",
-        "target": "localhost:5000/library/busybox:latest",
-        "old_digest": "sha256:old",
-        "new_digest": "sha256:new",
-        "run_id": run_id,
-        "detected_at": body["payload"]["detected_at"],
-        "status": "detected",
-    }
+    text = body["content"]["text"]
+    assert body["msg_type"] == "text"
+    assert "事件: mirror_update_detected" in text
+    assert "Source: docker.io/library/busybox:latest" in text
+    assert "Target: localhost:5000/library/busybox:latest" in text
+    assert "Old digest: sha256:old" in text
+    assert "New digest: sha256:new" in text
+    assert f"Run ID: {run_id}" in text
 
 
 def test_sync_does_not_send_update_notification_when_digest_unchanged(tmp_path, monkeypatch):

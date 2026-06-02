@@ -18,13 +18,14 @@ def make_panel_client(
     credentials_secret_key: str | None = "unit-secret-key",
     seed_config: bool = True,
     login: bool = True,
+    registry_storage_path: Path | None = None,
 ):
     config_path = tmp_path / "config" / "mirrors.yml"
     state_path = tmp_path / "data" / "sync-state.json"
     log_path = tmp_path / "data" / "sync.log"
     trigger_path = tmp_path / "data" / ".trigger"
     db_path = tmp_path / "data" / "mirror-registry.db"
-    registry_storage_path = tmp_path / "data" / "registry"
+    registry_storage_path = registry_storage_path or tmp_path / "data" / "registry"
     static_dir = tmp_path / "static"
 
     static_dir.mkdir(parents=True)
@@ -401,7 +402,70 @@ def test_storage_delete_mark_and_stats(panel_app):
     storage = client.get("/api/storage").json()
     assert storage["deletion_marks"][0]["repo"] == "library/busybox"
     assert "garbage-collect" in "\n".join(storage["garbage_collection"]["commands"])
+    assert storage["garbage_collection"]["request"]["status"] == "idle"
     assert client.post("/api/storage/stats/recalculate").status_code == 200
+
+
+def test_storage_gc_request_and_status_flow(panel_app):
+    client, _, _, _ = panel_app
+
+    requested = client.post("/api/storage/gc/request")
+
+    assert requested.status_code == 200
+    request = requested.json()["request"]
+    assert request["status"] == "requested"
+    assert request["request_id"]
+    assert request["can_request"] is False
+    assert request["active"] is True
+    assert client.post("/api/storage/gc/request").status_code == 409
+
+    running = client.post(
+        "/api/storage/gc/status",
+        json={"status": "running", "request_id": request["request_id"], "message": "running gc", "log_tail": "line 1"},
+    )
+
+    assert running.status_code == 200
+    running_request = running.json()["request"]
+    assert running_request["status"] == "running"
+    assert running_request["message"] == "running gc"
+    assert running_request["log_tail"] == "line 1"
+    assert running_request["started_at"]
+
+    mismatch = client.post("/api/storage/gc/status", json={"status": "completed", "request_id": "other"})
+    assert mismatch.status_code == 409
+
+    completed = client.post(
+        "/api/storage/gc/status",
+        json={"status": "completed", "request_id": request["request_id"], "message": "done"},
+    )
+
+    assert completed.status_code == 200
+    completed_request = completed.json()["request"]
+    assert completed_request["status"] == "completed"
+    assert completed_request["can_request"] is True
+    assert completed_request["finished_at"]
+    storage = client.get("/api/storage").json()
+    assert storage["garbage_collection"]["request"]["status"] == "completed"
+
+
+def test_storage_stats_supports_v2_root_mount(tmp_path, monkeypatch):
+    v2_root = tmp_path / "registry-v2"
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch, registry_storage_path=v2_root)
+
+    blob_digest = "e" * 64
+    blob_path = v2_root / "blobs" / "sha256" / blob_digest[:2] / blob_digest / "data"
+    blob_path.parent.mkdir(parents=True, exist_ok=True)
+    blob_path.write_bytes(b"layer")
+    repo_file = v2_root / "repositories" / "library" / "busybox" / "_manifests" / "tags" / "latest" / "current" / "link"
+    repo_file.parent.mkdir(parents=True, exist_ok=True)
+    repo_file.write_text(f"sha256:{blob_digest}", encoding="utf-8")
+
+    import panel.main as panel_main
+
+    assert panel_main.registry_blob_physical_bytes() == len(b"layer")
+    assert panel_main.estimate_repo_size("library/busybox") == len(f"sha256:{blob_digest}")
+    storage = client.get("/api/storage").json()
+    assert storage["physical_blob_bytes"] == len(b"layer")
 
 
 def test_storage_delete_mark_apply_deletes_registry_manifest(panel_app, monkeypatch):

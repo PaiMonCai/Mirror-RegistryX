@@ -42,6 +42,7 @@ from .schemas import (
     ScheduledPushPolicyIn,
     SettingsIn,
     StorageDeleteMarkIn,
+    StorageGcStatusIn,
     TagProtectionRuleIn,
 )
 from .db import connect_db, database_backend, database_path as db_database_path, db_execute, db_one, db_rows
@@ -160,6 +161,17 @@ def mirror_credential_references(config: dict, credential_id: str) -> list[str]:
 def runtime_state() -> dict:
     rows = db_rows("SELECT key, value, updated_at FROM runtime_state")
     return {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]} for row in rows}
+
+
+def set_runtime_state(key: str, value: str) -> None:
+    db_execute(
+        """
+        INSERT INTO runtime_state(key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, value, now_iso()),
+    )
 
 
 def ensure_parent(path: Path) -> None:
@@ -3112,7 +3124,7 @@ def directory_size(path: Path) -> int | None:
 
 
 def registry_blob_physical_bytes() -> int | None:
-    return directory_size(REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2" / "blobs" / "sha256")
+    return directory_size(registry_storage_root() / "blobs" / "sha256")
 
 
 def descriptor_blob(descriptor: dict) -> dict | None:
@@ -3312,18 +3324,66 @@ def recalculate_storage_stats_sync() -> None:
 
 
 def estimate_repo_size(repo: str) -> int | None:
-    return directory_size(REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2" / "repositories" / repo)
+    return directory_size(registry_storage_root() / "repositories" / repo)
+
+
+GC_ACTIVE_STATUSES = {"requested", "running"}
+GC_ALLOWED_STATUSES = {"idle", "requested", "running", "completed", "failed"}
+
+
+def runtime_state_value(state: dict, key: str, default: str = "") -> str:
+    item = state.get(key) or {}
+    return str(item.get("value") or default)
+
+
+def storage_gc_status(state: dict | None = None) -> dict:
+    state = state or runtime_state()
+    status = runtime_state_value(state, "storage_gc_status", "idle").strip().lower() or "idle"
+    if status not in GC_ALLOWED_STATUSES:
+        status = "idle"
+    request_id = runtime_state_value(state, "storage_gc_request_id")
+    updated_values = [
+        (state.get(key) or {}).get("updated_at")
+        for key in (
+            "storage_gc_status",
+            "storage_gc_request_id",
+            "storage_gc_requested_at",
+            "storage_gc_started_at",
+            "storage_gc_finished_at",
+            "storage_gc_message",
+            "storage_gc_log_tail",
+        )
+    ]
+    return {
+        "status": status,
+        "request_id": request_id,
+        "requested_at": runtime_state_value(state, "storage_gc_requested_at"),
+        "started_at": runtime_state_value(state, "storage_gc_started_at"),
+        "finished_at": runtime_state_value(state, "storage_gc_finished_at"),
+        "message": runtime_state_value(state, "storage_gc_message"),
+        "log_tail": runtime_state_value(state, "storage_gc_log_tail"),
+        "active": status in GC_ACTIVE_STATUSES,
+        "can_request": status not in GC_ACTIVE_STATUSES,
+        "updated_at": max([value for value in updated_values if value], default=""),
+    }
+
+
+def set_storage_gc_values(values: dict[str, str]) -> None:
+    for key, value in values.items():
+        set_runtime_state(key, value)
 
 
 def gc_guide() -> dict:
     return {
         "summary": "manifest 删除后，真正释放磁盘空间仍需执行 Registry garbage-collect。",
         "commands": [
-            "docker compose pull",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\run-registry-gc.ps1",
+            "docker compose stop sync",
             "docker compose stop registry",
             "docker compose run --rm registry registry garbage-collect /etc/docker/registry/config.yml",
-            "docker compose up -d registry",
+            "docker compose up -d registry sync",
         ],
+        "request": storage_gc_status(),
     }
 
 
@@ -3620,6 +3680,68 @@ def queue_storage_stats_recalculate(background_tasks: BackgroundTasks):
     background_tasks.add_task(recalculate_storage_stats_sync)
     audit_log("queue_recalculate", "storage_stats", "all", {})
     return {"ok": True, "status": "queued"}
+
+
+@app.get("/api/storage/gc/status")
+def get_storage_gc_status():
+    return storage_gc_status()
+
+
+@app.post("/api/storage/gc/request", dependencies=[Depends(require_write_token)])
+def request_storage_gc():
+    current = storage_gc_status()
+    if current["status"] in GC_ACTIVE_STATUSES:
+        raise HTTPException(409, f"垃圾回收请求已存在: {current['status']}")
+    requested_at = now_iso()
+    request_id = hashlib.sha256(f"{requested_at}:{os.urandom(8).hex()}".encode("utf-8")).hexdigest()[:16]
+    set_storage_gc_values(
+        {
+            "storage_gc_request_id": request_id,
+            "storage_gc_status": "requested",
+            "storage_gc_requested_at": requested_at,
+            "storage_gc_started_at": "",
+            "storage_gc_finished_at": "",
+            "storage_gc_message": "等待宿主机脚本执行 Registry garbage-collect",
+            "storage_gc_log_tail": "",
+        }
+    )
+    audit_log("request_gc", "storage", request_id, {"status": "requested"})
+    return {"ok": True, "request": storage_gc_status()}
+
+
+@app.post("/api/storage/gc/status", dependencies=[Depends(require_write_token)])
+def update_storage_gc_status(body: StorageGcStatusIn):
+    status = body.status.strip().lower()
+    if status not in {"requested", "running", "completed", "failed"}:
+        raise HTTPException(422, "垃圾回收状态只能是 requested/running/completed/failed")
+
+    current = storage_gc_status()
+    request_id = (body.request_id or current.get("request_id") or "").strip()
+    if current.get("request_id") and request_id and request_id != current["request_id"]:
+        raise HTTPException(409, "垃圾回收请求 ID 不匹配")
+    if not request_id:
+        request_id = hashlib.sha256(f"{now_iso()}:{os.urandom(8).hex()}".encode("utf-8")).hexdigest()[:16]
+
+    now = now_iso()
+    values = {
+        "storage_gc_request_id": request_id,
+        "storage_gc_status": status,
+        "storage_gc_message": (body.message or "").strip(),
+        "storage_gc_log_tail": (body.log_tail or "")[-20000:],
+    }
+    if status == "requested":
+        values["storage_gc_requested_at"] = body.requested_at or current.get("requested_at") or now
+    elif status == "running":
+        values["storage_gc_requested_at"] = current.get("requested_at") or body.requested_at or now
+        values["storage_gc_started_at"] = body.started_at or current.get("started_at") or now
+        values["storage_gc_finished_at"] = ""
+    else:
+        values["storage_gc_requested_at"] = current.get("requested_at") or body.requested_at or now
+        values["storage_gc_started_at"] = body.started_at or current.get("started_at") or now
+        values["storage_gc_finished_at"] = body.finished_at or now
+    set_storage_gc_values(values)
+    audit_log("update_gc", "storage", request_id, {"status": status, "message": values["storage_gc_message"]})
+    return {"ok": True, "request": storage_gc_status()}
 
 
 @app.get("/api/storage/search")

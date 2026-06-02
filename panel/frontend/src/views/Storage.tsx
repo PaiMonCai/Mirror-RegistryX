@@ -22,6 +22,7 @@ import { cx, diagnosticMessage, formatMB, formatRate, hostFromImage } from '../u
 
 export function Storage({ storage, api, reload, notify }: any) {
   const [applyingMarkId, setApplyingMarkId] = useState<number | null>(null);
+  const [requestingGc, setRequestingGc] = useState(false);
 
   async function recalculate() {
     try {
@@ -60,6 +61,20 @@ export function Storage({ storage, api, reload, notify }: any) {
     }
   }
 
+  async function requestGarbageCollection() {
+    setRequestingGc(true);
+    try {
+      const result = await api('POST', '/storage/gc/request', {});
+      await reload();
+      const requestId = result.request?.request_id ? `：${result.request.request_id}` : '';
+      notify(`已申请释放空间${requestId}`);
+    } catch (error) {
+      notify(formatApiError(error));
+    } finally {
+      setRequestingGc(false);
+    }
+  }
+
   const rows = (storage.images || []).flatMap((image: AnyRecord) =>
     (image.tags || []).map((tag: AnyRecord) => ({
       image,
@@ -68,6 +83,10 @@ export function Storage({ storage, api, reload, notify }: any) {
       deduped: tag.stats?.deduplicated_size_bytes ?? image.deduplicated_size_bytes ?? image.estimated_size_bytes,
     })),
   );
+  const gc = storage.garbage_collection || {};
+  const gcRequest = gc.request || {};
+  const gcStatus = gcRequest.status || 'idle';
+  const canRequestGc = gcRequest.can_request !== false && !requestingGc;
   return (
     <div className="stack">
       <div className="metric-grid storage-summary">
@@ -109,8 +128,29 @@ export function Storage({ storage, api, reload, notify }: any) {
           })}</tbody>
         </table>
       </Panel>
-      <Panel title="垃圾回收指引">
+      <Panel
+        title="垃圾回收指引"
+        action={
+          <ConfirmButton
+            confirmText="确认申请"
+            className="primary"
+            disabled={!canRequestGc}
+            onConfirm={requestGarbageCollection}
+          >
+            <RefreshCw size={16} />{requestingGc ? '申请中' : '申请释放空间'}
+          </ConfirmButton>
+        }
+      >
         <p className="sect-desc compact">{storage.garbage_collection?.summary}</p>
+        <div className="chip-list">
+          <Badge value={gcStatus} />
+          {gcRequest.request_id && <span className="chip mono">{gcRequest.request_id}</span>}
+          {gcRequest.requested_at && <span className="chip">申请 {gcRequest.requested_at}</span>}
+          {gcRequest.started_at && <span className="chip">开始 {gcRequest.started_at}</span>}
+          {gcRequest.finished_at && <span className="chip">结束 {gcRequest.finished_at}</span>}
+        </div>
+        {gcRequest.message && <p className="sect-desc compact">{gcRequest.message}</p>}
+        {gcRequest.log_tail && <pre>{gcRequest.log_tail}</pre>}
         <pre>{(storage.garbage_collection?.commands || []).join('\n')}</pre>
       </Panel>
     </div>

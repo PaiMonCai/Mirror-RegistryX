@@ -109,6 +109,16 @@ class StorageDeleteMarkIn(BaseModel):
     reason: str | None = Field(default="", max_length=500)
 
 
+class StorageGcStatusIn(BaseModel):
+    status: str = Field(min_length=1, max_length=32)
+    request_id: str | None = Field(default=None, max_length=64)
+    message: str | None = Field(default="", max_length=2000)
+    log_tail: str | None = Field(default="", max_length=20000)
+    requested_at: str | None = Field(default=None, max_length=64)
+    started_at: str | None = Field(default=None, max_length=64)
+    finished_at: str | None = Field(default=None, max_length=64)
+
+
 class TagProtectionRuleIn(BaseModel):
     id: str | None = Field(default=None, max_length=64)
     name: str = Field(min_length=1, max_length=120)

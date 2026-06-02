@@ -1435,10 +1435,55 @@ def should_send_webhook_event(event_type: str, payload: dict | None = None) -> b
             set_runtime_state("notify_last_suppressed_key", fingerprint)
             logger.info("webhook 通知已去重: %s", event_type)
             return False
-        set_runtime_state(state_key, now.isoformat())
     except Exception as exc:  # pragma: no cover - notification must not break sync execution
-        logger.warning("webhook 去重状态写入失败: %s", exc)
+        logger.warning("webhook 去重状态读取失败: %s", exc)
     return True
+
+
+WEBHOOK_EVENT_TITLES = {
+    "mirror_update_detected": "镜像更新已检测",
+    "disk_low": "磁盘空间告警",
+    "sync_failed": "同步失败",
+    "sync_recovered": "同步恢复",
+    "scheduled_push_failed": "计划推送失败",
+}
+
+
+def build_feishu_text(event_type: str, payload: dict) -> str:
+    title = WEBHOOK_EVENT_TITLES.get(event_type, event_type)
+    lines = [
+        f"Mirror Registry - {title}",
+        f"事件: {event_type}",
+        f"时间: {now_iso()}",
+        f"版本: {APP_VERSION} ({IMAGE_TAG})",
+    ]
+    for key, label in [
+        ("run_id", "Run ID"),
+        ("reason", "原因"),
+        ("source", "Source"),
+        ("target", "Target"),
+        ("old_digest", "Old digest"),
+        ("new_digest", "New digest"),
+        ("total", "总数"),
+        ("updated", "更新"),
+        ("skipped", "跳过"),
+        ("failed", "失败"),
+    ]:
+        value = payload.get(key)
+        if value not in (None, ""):
+            lines.append(f"{label}: {value}")
+    disk = payload.get("disk")
+    if isinstance(disk, dict):
+        lines.append(f"磁盘: free={disk.get('free_bytes', '-')}, total={disk.get('total_bytes', '-')}, low={disk.get('low', '-')}")
+    lines.append("Payload: " + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return "\n".join(lines)
+
+
+def build_feishu_webhook_body(event_type: str, payload: dict) -> bytes:
+    return json.dumps(
+        {"msg_type": "text", "content": {"text": build_feishu_text(event_type, payload)}},
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> None:
@@ -1447,17 +1492,7 @@ def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> Non
         return
     if not should_send_webhook_event(event_type, payload):
         return
-    body = json.dumps(
-        {
-            "event": event_type,
-            "app": "mirror-registry",
-            "app_version": APP_VERSION,
-            "image_tag": IMAGE_TAG,
-            "created_at": now_iso(),
-            "payload": payload,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
+    body = build_feishu_webhook_body(event_type, payload)
     request = urllib.request.Request(
         url,
         data=body,
@@ -1467,10 +1502,18 @@ def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> Non
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             logger.info("webhook 通知已发送: %s HTTP %s", event_type, response.status)
-        set_runtime_state("notify_last_sent_at", now_iso())
+        sent_at = now_iso()
+        fingerprint = webhook_dedupe_key(event_type, payload)
+        if NOTIFY_DEDUPE_SECONDS > 0:
+            set_runtime_state(f"notify_last_{fingerprint}", sent_at)
+        set_runtime_state("notify_last_sent_at", sent_at)
         set_runtime_state("notify_last_sent_event", event_type)
-        set_runtime_state("notify_last_sent_key", webhook_dedupe_key(event_type, payload))
+        set_runtime_state("notify_last_sent_key", fingerprint)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        set_runtime_state("notify_last_error_at", now_iso())
+        set_runtime_state("notify_last_error_event", event_type)
+        set_runtime_state("notify_last_error_key", webhook_dedupe_key(event_type, payload))
+        set_runtime_state("notify_last_error", str(exc))
         logger.warning("webhook 通知失败: %s", exc)
 
 
