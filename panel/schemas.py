@@ -129,6 +129,49 @@ class StorageGcStatusIn(BaseModel):
     finished_at: str | None = Field(default=None, max_length=64)
 
 
+class OpsTaskCreateIn(BaseModel):
+    action: str = Field(min_length=1, max_length=64)
+    agent_id: str | None = Field(default=None, max_length=64)
+    params: dict = Field(default_factory=dict)
+
+
+class OpsTaskEventIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+    type: str = Field(min_length=1, max_length=64)
+    message: str | None = Field(default="", max_length=20000)
+    detail: dict = Field(default_factory=dict)
+    log_tail: str | None = Field(default="", max_length=20000)
+
+
+class OpsTaskCompleteIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+    status: str = Field(min_length=1, max_length=32)
+    exit_code: int | None = None
+    log_tail: str | None = Field(default="", max_length=20000)
+    error: str | None = Field(default="", max_length=20000)
+    result: dict = Field(default_factory=dict)
+
+
+class OpsAgentHeartbeatIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+    host_label: str | None = Field(default=None, max_length=120)
+    environment: str = Field(default="prod", max_length=64)
+    capabilities: list[str] = Field(default_factory=list, max_length=32)
+    status: str = Field(default="online", max_length=32)
+    version: str | None = Field(default=None, max_length=64)
+    message: str | None = Field(default="", max_length=1000)
+
+
+class OpsAgentClaimIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+    capabilities: list[str] = Field(default_factory=list, max_length=32)
+    lease_seconds: int = Field(default=120, ge=30, le=1800)
+
+
+class OpsAgentTaskControlIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+
+
 class TagProtectionRuleIn(BaseModel):
     id: str | None = Field(default=None, max_length=64)
     name: str = Field(min_length=1, max_length=120)

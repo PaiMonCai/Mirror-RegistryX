@@ -3,5 +3,6 @@ export { Runs } from './views/Runs';
 export { Mirrors } from './views/Mirrors';
 export { Credentials } from './views/Credentials';
 export { Storage } from './views/Storage';
+export { Operations } from './views/Operations';
 export { Logs } from './views/Logs';
 export { SettingsView } from './views/SettingsView';

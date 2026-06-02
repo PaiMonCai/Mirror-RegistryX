@@ -13,6 +13,7 @@ import {
   Mirrors,
   Runs,
   SettingsView,
+  Operations,
   Storage,
 } from './views';
 import './styles.css';
@@ -31,6 +32,10 @@ function App() {
   const [events, setEvents] = useState<AnyRecord[]>([]);
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [opsAgents, setOpsAgents] = useState<AnyRecord[]>([]);
+  const [opsTasks, setOpsTasks] = useState<AnyRecord[]>([]);
+  const [opsEvents, setOpsEvents] = useState<AnyRecord[]>([]);
+  const [selectedOpsTask, setSelectedOpsTask] = useState<AnyRecord | null>(null);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
   const api = useMemo(() => createApiClient(), []);
@@ -61,6 +66,7 @@ function App() {
     await api('POST', '/auth/login', { username, password });
     await loadAuth();
     await loadStatus();
+    await loadOperations();
   }
 
   async function logout() {
@@ -102,12 +108,35 @@ function App() {
     setCredentials(await api('GET', '/credentials'));
   }
 
+  async function loadOperations(taskId?: number) {
+    const [agents, tasks] = await Promise.all([
+      api('GET', '/ops-agents'),
+      api('GET', '/ops-tasks?limit=60'),
+    ]);
+    setOpsAgents(agents);
+    setOpsTasks(tasks);
+    const selectedId = taskId || selectedOpsTask?.id || tasks?.[0]?.id;
+    if (selectedId) {
+      const [task, events] = await Promise.all([
+        api('GET', `/ops-tasks/${selectedId}`),
+        api('GET', `/ops-tasks/${selectedId}/events`),
+      ]);
+      setSelectedOpsTask(task);
+      setOpsEvents(events);
+    } else {
+      setSelectedOpsTask(null);
+      setOpsEvents([]);
+    }
+  }
+
   useEffect(() => {
     loadAuth();
   }, []);
 
   useEffect(() => {
-    if (auth.authenticated) loadStatus().catch((error) => notify(formatApiError(error)));
+    if (auth.authenticated) {
+      Promise.all([loadStatus(), loadOperations()]).catch((error) => notify(formatApiError(error)));
+    }
   }, [auth.authenticated]);
 
   useEffect(() => {
@@ -121,6 +150,7 @@ function App() {
       }
       if (view === 'credentials') await loadCredentials();
       if (view === 'storage') await loadStorage();
+      if (view === 'operations') await loadOperations();
       if (view === 'logs') await loadLogs();
       if (view === 'settings') await loadSettings();
     };
@@ -213,11 +243,12 @@ function App() {
           </header>
 
           <main>
-        {view === 'dashboard' && <Dashboard status={status} reload={() => action('已刷新', loadStatus)} setView={setView} />}
+        {view === 'dashboard' && <Dashboard status={status} opsAgents={opsAgents} opsTasks={opsTasks} reload={() => action('已刷新', async () => { await loadStatus(); await loadOperations(); })} setView={setView} />}
         {view === 'runs' && <Runs runs={runs} syncQueue={syncQueue} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
+        {view === 'operations' && <Operations agents={opsAgents} tasks={opsTasks} events={opsEvents} selectedTask={selectedOpsTask} setSelectedTask={setSelectedOpsTask} api={api} reload={loadOperations} notify={notify} />}
         {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
           {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}
           </main>

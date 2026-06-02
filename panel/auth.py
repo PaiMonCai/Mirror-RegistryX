@@ -178,6 +178,8 @@ def authenticate_request(request: Request) -> dict | None:
 
 async def require_api_auth(request: Request, call_next):
     path = request.url.path
+    if path.startswith("/api/ops-agent/"):
+        return await call_next(request)
     if path.startswith("/api/") and path != "/api/auth/login":
         user = authenticate_request(request)
         if not user:

@@ -28,6 +28,7 @@ services:
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-mirror_registry_session}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      OPS_AGENT_TOKEN: ${OPS_AGENT_TOKEN:-}
     ports:
       - "8080:8080"
     volumes:
@@ -65,3 +66,25 @@ services:
       - ./data:/data              # sync-state.json + sync.log + .trigger
     depends_on:
       - registry
+
+  ops-agent:
+    build:
+      context: .
+      dockerfile: ops-agent/Dockerfile
+    restart: unless-stopped
+    environment:
+      PANEL_URL: http://panel:8080
+      OPS_AGENT_ID: ${OPS_AGENT_ID:-local}
+      OPS_AGENT_HOST_LABEL: ${OPS_AGENT_HOST_LABEL:-Local host}
+      OPS_AGENT_ENVIRONMENT: ${OPS_AGENT_ENVIRONMENT:-dev}
+      OPS_AGENT_TOKEN: ${OPS_AGENT_TOKEN:-}
+      COMPOSE_FILE: /workspace/docker-compose.dev.yml
+      OPS_AGENT_POLL_INTERVAL_SECONDS: ${OPS_AGENT_POLL_INTERVAL_SECONDS:-5}
+      OPS_AGENT_COMMAND_TIMEOUT_SECONDS: ${OPS_AGENT_COMMAND_TIMEOUT_SECONDS:-900}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace:ro
+      - ./data:/data
+      - ./data/registry:/registry
+    depends_on:
+      - panel

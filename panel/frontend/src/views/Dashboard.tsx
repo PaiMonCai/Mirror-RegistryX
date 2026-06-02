@@ -3,8 +3,22 @@ import { Badge, Metric, Panel } from '../components/common';
 import type { AnyRecord } from '../types';
 import { cx, formatMB } from '../utils';
 
-export function Dashboard({ status, reload, setView }: { status: AnyRecord; reload: () => void; setView: (view: any) => void }) {
+export function Dashboard({
+  status,
+  opsAgents = [],
+  opsTasks = [],
+  reload,
+  setView,
+}: {
+  status: AnyRecord;
+  opsAgents?: AnyRecord[];
+  opsTasks?: AnyRecord[];
+  reload: () => void;
+  setView: (view: any) => void;
+}) {
   const latestRun = status.latest_run;
+  const onlineOpsAgents = opsAgents.filter((agent) => agent.status === 'online');
+  const latestOpsTask = opsTasks[0];
   const health = status.disk_low ? 'warn' : latestRun?.status === 'failed' ? 'error' : 'ok';
   const healthCopy: Record<string, { title: string; body: string }> = {
     ok: { title: '本地镜像服务运行正常', body: '面板、同步队列和本地 Registry 已就绪。需要新增镜像时，直接从镜像配置开始。' },
@@ -16,6 +30,7 @@ export function Dashboard({ status, reload, setView }: { status: AnyRecord; relo
     { label: '添加镜像', view: 'mirrors', tone: 'default' },
     { label: '保存凭据', view: 'credentials', tone: 'default' },
     { label: '查看任务', view: 'runs', tone: latestRun?.status === 'failed' ? 'danger' : 'default' },
+    { label: '运维操作', view: 'operations', tone: 'default' },
     { label: '查看日志', view: 'logs', tone: 'default' },
   ].filter(Boolean) as Array<{ label: string; view: any; tone: string }>;
   const cards = [
@@ -24,6 +39,7 @@ export function Dashboard({ status, reload, setView }: { status: AnyRecord; relo
     ['已同步', status.synced ?? 0],
     ['待同步', status.pending ?? 0],
     ['同步状态', status.is_syncing ? '运行中' : '空闲'],
+    ['运维代理', opsAgents.length ? `${onlineOpsAgents.length}/${opsAgents.length} 在线` : '未注册'],
     ['版本', status.image_tag || status.app_version || '-'],
   ];
   return (
@@ -66,6 +82,14 @@ export function Dashboard({ status, reload, setView }: { status: AnyRecord; relo
             <dt><Settings2 size={14} /> 重试</dt><dd>{status.sync_retry_count ?? '-'}</dd>
             <dt>Cookie</dt><dd>{status.session_cookie_secure ? 'HTTPS' : 'HTTP'}</dd>
             <dt>认证</dt><dd>{status.auth_required ? '已启用' : '未启用'}</dd>
+          </dl>
+        </Panel>
+        <Panel title="运维代理">
+          <dl className="kv">
+            <dt>代理</dt><dd>{opsAgents.length ? `${onlineOpsAgents.length}/${opsAgents.length} 在线` : '未注册'}</dd>
+            <dt>最近任务</dt><dd>{latestOpsTask ? `${latestOpsTask.action} · ${latestOpsTask.status}` : '-'}</dd>
+            <dt>失败任务</dt><dd>{opsTasks.find((task) => ['failed', 'timed_out'].includes(task.status))?.id || '-'}</dd>
+            <dt>下步入口</dt><dd><button onClick={() => setView('operations')}>打开运维面板</button></dd>
           </dl>
         </Panel>
         <Panel title="存储状态">

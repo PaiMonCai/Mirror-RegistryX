@@ -47,6 +47,7 @@ def make_panel_client(
     monkeypatch.setenv("REGISTRY_STORAGE_PATH", str(registry_storage_path))
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
     monkeypatch.setenv("WORKER_TOKEN", "worker-token")
+    monkeypatch.setenv("OPS_AGENT_TOKEN", "ops-agent-token")
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-password")
     monkeypatch.setenv("SESSION_TTL_SECONDS", "604800")
@@ -482,10 +483,14 @@ def test_storage_gc_request_and_status_flow(panel_app):
 
     assert requested.status_code == 200
     request = requested.json()["request"]
+    task = requested.json()["task"]
     assert request["status"] == "requested"
     assert request["request_id"]
     assert request["can_request"] is False
     assert request["active"] is True
+    assert task["action"] == "registry_gc"
+    assert task["status"] == "queued"
+    assert task["confirmed_at"]
     assert client.post("/api/storage/gc/request").status_code == 409
 
     running = client.post(
@@ -638,6 +643,113 @@ def test_storage_delete_mark_apply_rejects_invalid_or_unsafe_cleanup(panel_app, 
     assert failed.status_code == 502
     assert "删除失败" in failed.json()["message"]
     assert panel_main.db_one("SELECT id FROM deletion_marks WHERE id = ?", (failed_mark["id"],)) is not None
+
+
+def test_ops_agent_task_validation_claim_complete_and_redaction(panel_app):
+    client, _, _, _ = panel_app
+
+    unknown = client.post("/api/ops-tasks", json={"action": "shell", "params": {"command": "id"}})
+    assert unknown.status_code == 422
+
+    invalid_service = client.post("/api/ops-tasks", json={"action": "restart_service", "params": {"service": "db"}})
+    assert invalid_service.status_code == 422
+
+    task = client.post("/api/ops-tasks", json={"action": "restart_service", "params": {"service": "sync"}}).json()["task"]
+    assert task["status"] == "queued"
+    assert task["requires_confirmation"] is False
+
+    headers = {"Authorization": "Bearer ops-agent-token"}
+    heartbeat = client.post(
+        "/api/ops-agent/heartbeat",
+        headers=headers,
+        json={
+            "agent_id": "local",
+            "host_label": "Local host",
+            "environment": "test",
+            "capabilities": ["service_status", "restart_service"],
+            "status": "online",
+            "message": "ready token=top-secret",
+        },
+    )
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["agent"]["status"] == "online"
+    assert "top-secret" not in json.dumps(heartbeat.json(), ensure_ascii=False)
+
+    claimed = client.post(
+        "/api/ops-agent/claim",
+        headers=headers,
+        json={"agent_id": "local", "capabilities": ["restart_service"], "lease_seconds": 90},
+    ).json()["task"]
+    assert claimed["id"] == task["id"]
+    assert claimed["status"] == "claimed"
+
+    event = client.post(
+        f"/api/ops-agent/tasks/{task['id']}/events",
+        headers=headers,
+        json={
+            "agent_id": "local",
+            "type": "log",
+            "message": "running password=secret-value",
+            "detail": {"authorization": "Bearer abc"},
+            "log_tail": "token=secret-value",
+        },
+    )
+    assert event.status_code == 200
+    assert event.json()["task"]["status"] == "running"
+    assert "secret-value" not in json.dumps(event.json(), ensure_ascii=False)
+
+    completed = client.post(
+        f"/api/ops-agent/tasks/{task['id']}/complete",
+        headers=headers,
+        json={
+            "agent_id": "local",
+            "status": "succeeded",
+            "exit_code": 0,
+            "log_tail": "ok token=secret-value",
+            "result": {"cookie": "session-secret"},
+        },
+    )
+    assert completed.status_code == 200
+    payload = completed.json()
+    assert payload["task"]["status"] == "succeeded"
+    assert "secret-value" not in json.dumps(payload, ensure_ascii=False)
+    events = client.get(f"/api/ops-tasks/{task['id']}/events").json()
+    assert [event["type"] for event in events] == ["created", "claimed", "log", "succeeded"]
+    assert "session-secret" not in json.dumps(events, ensure_ascii=False)
+
+
+def test_ops_agent_high_risk_confirmation_and_stale_recovery(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer ops-agent-token"}
+
+    update = client.post("/api/ops-tasks", json={"action": "update_services", "params": {"services": ["panel", "sync"]}}).json()["task"]
+    assert update["requires_confirmation"] is True
+    assert client.post("/api/ops-agent/claim", headers=headers, json={"agent_id": "local", "capabilities": ["update_services"]}).json()["task"] is None
+
+    confirmed = client.post(f"/api/ops-tasks/{update['id']}/confirm").json()["task"]
+    assert confirmed["requires_confirmation"] is False
+    claimed = client.post("/api/ops-agent/claim", headers=headers, json={"agent_id": "local", "capabilities": ["update_services"]}).json()["task"]
+    assert claimed["id"] == update["id"]
+
+    import panel.main as panel_main
+
+    stale_time = "2000-01-01T00:00:00+00:00"
+    panel_main.db_execute(
+        "UPDATE ops_tasks SET status = 'running', lease_expires_at = ? WHERE id = ?",
+        (stale_time, update["id"]),
+    )
+    recovered = client.get(f"/api/ops-tasks/{update['id']}").json()
+    assert recovered["status"] == "timed_out"
+
+    service_status = client.post("/api/ops-tasks", json={"action": "service_status", "params": {}}).json()["task"]
+    claimed_status = client.post("/api/ops-agent/claim", headers=headers, json={"agent_id": "local", "capabilities": ["service_status"]}).json()["task"]
+    assert claimed_status["id"] == service_status["id"]
+    panel_main.db_execute(
+        "UPDATE ops_tasks SET status = 'claimed', lease_expires_at = ? WHERE id = ?",
+        (stale_time, service_status["id"]),
+    )
+    requeued = client.get(f"/api/ops-tasks/{service_status['id']}").json()
+    assert requeued["status"] == "queued"
 
 
 def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
@@ -846,16 +958,17 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert "sync_queue" in tables
         assert "api_tokens" not in tables
         versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1"]
+        assert versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2"]
         mirror_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mirrors)")}
         queue_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_queue)")}
         assert {"mode", "next_check_at", "pending_push_digest", "allow_latest_push"} <= mirror_columns
         assert {"task_type", "mirror_source", "mirror_target", "digest", "lease_expires_at"} <= queue_columns
         assert "mirror_events" in tables
+        assert {"ops_agents", "ops_tasks", "ops_task_events"} <= tables
 
         panel_db.init_db(conn)
         repeat_versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1"]
+        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2"]
 
     old_db_path = tmp_path / "old.db"
     with sqlite3.connect(old_db_path) as conn:
@@ -886,7 +999,9 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0001_initial'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0002_drop_api_tokens'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0003_mirror_monitoring_phase1'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0004_ops_agent_phase2'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM ops_tasks").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'api_tokens'").fetchone()[0] == 0
         migrated = conn.execute("SELECT mode, next_check_at, last_source_digest FROM mirrors WHERE source = ?", ("docker.io/library/busybox:latest",)).fetchone()
         assert migrated["mode"] == "auto_push"

@@ -22,6 +22,7 @@ legacy = importlib.reload(importlib.import_module(".legacy", __package__))
 _credentials = importlib.reload(importlib.import_module(".credentials", __package__))
 _mirrors = importlib.reload(importlib.import_module(".mirrors", __package__))
 _ops = importlib.reload(importlib.import_module(".ops", __package__))
+_ops_agent = importlib.reload(importlib.import_module(".ops_agent", __package__))
 _storage = importlib.reload(importlib.import_module(".storage", __package__))
 
 
@@ -40,6 +41,7 @@ app.middleware("http")(require_api_auth)
 
 app.include_router(auth_router)
 app.include_router(queue_router)
+app.include_router(_ops_agent.router)
 app.include_router(_ops.router)
 app.include_router(_mirrors.router)
 app.include_router(_storage.router)

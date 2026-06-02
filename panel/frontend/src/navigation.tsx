@@ -7,6 +7,7 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
   mirrors: { title: '镜像', subtitle: '添加、同步、导入和导出镜像配置。', icon: <>◧</> },
   credentials: { title: '凭据', subtitle: '保存 Docker Hub、GHCR 或目标仓库的账号 token。', icon: <>⊞</> },
   storage: { title: '存储', subtitle: '查看本地仓库占用、删除标记和清理命令。', icon: <>◫</> },
+  operations: { title: '运维', subtitle: '代理心跳、服务状态、更新、重启和诊断任务。', icon: <>⚡</> },
   logs: { title: '日志', subtitle: '同步日志和事件记录。', icon: <>≡</> },
   settings: { title: '设置', subtitle: '同步间隔、并发、重试和飞书通知。', icon: <>⚙</> },
 };
@@ -14,7 +15,7 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
 export const navGroups: Array<{ label: string; views: View[] }> = [
   { label: '概览', views: ['dashboard'] },
   { label: '镜像', views: ['mirrors', 'credentials', 'storage'] },
-  { label: '同步', views: ['runs', 'logs'] },
+  { label: '同步', views: ['runs', 'operations', 'logs'] },
   { label: '设置', views: ['settings'] },
 ];
 

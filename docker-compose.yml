@@ -29,6 +29,7 @@ services:
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-mirror_registry_session}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      OPS_AGENT_TOKEN: ${OPS_AGENT_TOKEN:-}
     ports:
       - "8080:8080"
     volumes:
@@ -65,6 +66,26 @@ services:
       - mirror-registry-data:/data
     depends_on:
       - registry
+
+  ops-agent:
+    image: "ghcr.io/paimoncai/mirror-registryx-ops-agent:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    environment:
+      PANEL_URL: http://panel:8080
+      OPS_AGENT_ID: ${OPS_AGENT_ID:-local}
+      OPS_AGENT_HOST_LABEL: ${OPS_AGENT_HOST_LABEL:-Local host}
+      OPS_AGENT_ENVIRONMENT: ${OPS_AGENT_ENVIRONMENT:-prod}
+      OPS_AGENT_TOKEN: ${OPS_AGENT_TOKEN:-}
+      COMPOSE_FILE: /workspace/docker-compose.yml
+      OPS_AGENT_POLL_INTERVAL_SECONDS: ${OPS_AGENT_POLL_INTERVAL_SECONDS:-5}
+      OPS_AGENT_COMMAND_TIMEOUT_SECONDS: ${OPS_AGENT_COMMAND_TIMEOUT_SECONDS:-900}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace:ro
+      - mirror-registry-data:/data
+      - mirror-registry-storage:/registry
+    depends_on:
+      - panel
 
 volumes:
   mirror-registry-config:

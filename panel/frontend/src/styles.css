@@ -1824,6 +1824,27 @@ pre::-webkit-scrollbar-thumb,
   grid-template-columns: repeat(4, minmax(140px, 1fr));
 }
 
+.ops-summary {
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+}
+
+.ops-grid {
+  align-items: start;
+}
+
+.ops-actions,
+.ops-service-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ops-service-grid {
+  padding-top: 10px;
+  border-top: 1px solid var(--glass-border2);
+}
+
 @media (max-width: 1080px) {
   .shell {
     flex-direction: column;
@@ -1937,6 +1958,10 @@ pre::-webkit-scrollbar-thumb,
   }
 
   .storage-summary {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .ops-summary {
     grid-template-columns: repeat(2, minmax(140px, 1fr));
   }
 
@@ -2072,7 +2097,8 @@ pre::-webkit-scrollbar-thumb,
 
   .metric-grid,
   .stats-grid,
-  .storage-summary,
+    .storage-summary,
+    .ops-summary,
   .form-grid,
   .credentials-form,
   .discovery-form,
