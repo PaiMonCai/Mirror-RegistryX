@@ -2,13 +2,34 @@
 
 [中文文档](README.md)
 
-Single-node private Docker image cache with a local Registry, a management panel, and a scheduled sync worker. The project is now scoped for personal-server use: login, mirror configuration, registry credentials, sync runs, storage, and logs.
+Single-node private Docker image cache with a local Registry, a management panel, and a scheduled sync worker. The project is scoped for personal servers and small teams: the core goal is reliable local image availability through login, mirror configuration, registry credentials, sync runs, storage cleanup, logs, and safe upgrades.
+
+See [PROJECT_BRIEF.md](PROJECT_BRIEF.md) for the project positioning.
+
+## Capability Layers
+
+Core capabilities protect local image availability:
+
+- Administrator login and sessions.
+- Mirror rule configuration.
+- Source and target Registry credentials.
+- Manual sync, scheduled sync, queue, history, and failed task retry.
+- Logs, events, and local Registry status.
+- Storage usage, deletion marks, and garbage-collection guidance.
+- Single-node Docker Compose deployment and image upgrade workflow.
+
+Enhanced capabilities support operations and governance, but should not obscure the core sync workflow:
+
+- Image discovery, rule templates, push windows, notification policies, and bulk operations.
+- `ops-agent` operational tasks, service restart, update, diagnostics, and backup checks.
+- Release trust scan, promotion, rollback, and restore drills.
 
 ## Services
 
 - `registry`: official `registry:2`, storing local image layers.
 - `panel`: FastAPI plus the React management panel on port `8080`.
 - `sync`: Python worker that mirrors upstream images into the local Registry with `skopeo copy`.
+- `ops-agent`: optional enhanced operational agent for controlled service status, restart, update, diagnostics, and backup checks. The core sync workflow does not depend on it.
 
 ## Production Deployment
 
