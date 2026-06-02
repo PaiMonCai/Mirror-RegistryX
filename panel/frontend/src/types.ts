@@ -81,6 +81,7 @@ export type View =
   | 'mirrors'
   | 'credentials'
   | 'storage'
+  | 'governance'
   | 'operations'
   | 'logs'
   | 'settings';

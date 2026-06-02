@@ -140,7 +140,6 @@ def test_non_core_api_routes_are_not_exposed(panel_app):
         "/api/database-guide",
         "/api/registries",
         "/api/mirror-groups",
-        "/api/schedules",
     ]
 
     for route in hidden_routes:
@@ -236,6 +235,100 @@ def test_mirror_rule_control_endpoints(panel_app):
     assert events[0]["status"] == "skipped"
     assert events[0]["new_digest"] == "sha256:manual"
     assert "mode: auto_push" in config_path.read_text(encoding="utf-8")
+
+
+def test_governance_template_discovery_policy_window_and_manual_bypass(panel_app):
+    client, _, _, _ = panel_app
+
+    assert client.post(
+        "/api/mirror-rule-templates",
+        json={
+            "id": "docker-template",
+            "name": "Docker Template",
+            "source_registry_pattern": "docker.io",
+            "source_namespace_pattern": "library",
+            "source_repo_pattern": "library/*",
+            "target_registry": "localhost:5000",
+            "target_namespace_template": "mirror/{namespace}",
+            "mode": "auto_push",
+            "check_interval_minutes": 15,
+            "allow_latest_push": True,
+            "priority": 10,
+        },
+    ).status_code == 200
+    preview = client.post(
+        "/api/mirror-rule-templates/docker-template/preview",
+        json={"source": "docker.io/library/busybox:latest"},
+    ).json()
+    assert preview["target"] == "localhost:5000/mirror/library/busybox:latest"
+    assert preview["matches"] is True
+
+    assert client.post(
+        "/api/discovery-sources",
+        json={
+            "id": "inline-apps",
+            "name": "Inline Apps",
+            "source_type": "inline",
+            "content": "image: docker.io/library/busybox:latest\nsidecar: ghcr.io/acme/api:v2",
+        },
+    ).status_code == 200
+    scan = client.post("/api/discovery-sources/inline-apps/scan").json()
+    assert scan["seen"] == 2
+    candidates = client.get("/api/discovery-candidates").json()
+    busybox = next(item for item in candidates if item["source_image"] == "docker.io/library/busybox:latest")
+    assert busybox["recommended_template_id"] == "docker-template"
+    assert busybox["action"] == "create_rule"
+
+    imported = client.post("/api/discovery-candidates/batch/import", json={"ids": [busybox["id"]], "trigger_sync": True}).json()
+    assert imported["imported"] == 1
+    mirror = client.get("/api/mirrors").json()[0]
+    assert mirror["template_id"] == "docker-template"
+    assert mirror["target"] == "localhost:5000/mirror/library/busybox:latest"
+
+    assert client.post(
+        "/api/notification-policies",
+        json={
+            "id": "critical-only",
+            "name": "Critical Only",
+            "events": {"push_failed": True},
+            "min_severity": "critical",
+            "quiet_hours": {"enabled": False},
+        },
+    ).status_code == 200
+    decision = client.post(
+        "/api/notification-policies/critical-only/test",
+        json={"event_type": "push_failed", "severity": "warning", "payload": {"source": mirror["source"]}},
+    ).json()
+    assert decision["decision"]["send"] is False
+    assert decision["decision"]["reason"] == "below_min_severity"
+
+    assert client.post(
+        "/api/push-windows",
+        json={
+            "id": "freeze-all",
+            "name": "Freeze All",
+            "allow_windows": [],
+            "freeze_windows": [{"days": [], "start": "00:00", "end": "23:59"}],
+        },
+    ).status_code == 200
+    evaluation = client.post("/api/push-windows/freeze-all/preview").json()["evaluation"]
+    assert evaluation["allowed"] is False
+    import panel.main as panel_main
+
+    panel_main.db_execute("UPDATE mirrors SET push_window_id = ?, pending_push_digest = ?, last_source_digest = ? WHERE source = ?", ("freeze-all", "sha256:manual", "sha256:manual", mirror["source"]))
+    blocked = client.post("/api/mirrors/0/push", json={"digest": "sha256:manual"})
+    assert blocked.status_code == 409
+    pushed = client.post(
+        "/api/mirrors/0/push",
+        json={"digest": "sha256:manual", "confirm_bypass_window": True, "bypass_reason": "operator release"},
+    ).json()
+    assert pushed["queue"]["task_type"] == "push"
+    assert pushed["window"]["allowed"] is False
+    events = client.get("/api/mirror-events", params={"mirror_id": mirror["source"]}).json()
+    assert events[0]["type"] == "push_window_bypassed"
+
+    summary = client.get("/api/governance/summary").json()
+    assert summary["latest_bulk_operation"]
 
 
 def test_missing_config_file_bootstraps_default_config(tmp_path, monkeypatch):
@@ -958,17 +1051,19 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert "sync_queue" in tables
         assert "api_tokens" not in tables
         versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2"]
+        assert versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2", "0005_governance_phase3"]
         mirror_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mirrors)")}
         queue_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_queue)")}
         assert {"mode", "next_check_at", "pending_push_digest", "allow_latest_push"} <= mirror_columns
+        assert {"template_id", "notification_policy_id", "push_window_id", "governance_status"} <= mirror_columns
         assert {"task_type", "mirror_source", "mirror_target", "digest", "lease_expires_at"} <= queue_columns
         assert "mirror_events" in tables
         assert {"ops_agents", "ops_tasks", "ops_task_events"} <= tables
+        assert {"mirror_rule_templates", "discovery_sources", "discovery_candidates", "notification_policies", "push_windows", "bulk_operations"} <= tables
 
         panel_db.init_db(conn)
         repeat_versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2"]
+        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1", "0004_ops_agent_phase2", "0005_governance_phase3"]
 
     old_db_path = tmp_path / "old.db"
     with sqlite3.connect(old_db_path) as conn:
@@ -1000,6 +1095,7 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0002_drop_api_tokens'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0003_mirror_monitoring_phase1'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0004_ops_agent_phase2'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0005_governance_phase3'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM ops_tasks").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'api_tokens'").fetchone()[0] == 0

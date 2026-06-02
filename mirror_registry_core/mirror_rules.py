@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 
 MIRROR_MODES = {"auto_push", "monitor_only"}
-PUSH_STATUSES = {"idle", "pending", "running", "succeeded", "failed", "degraded", "skipped"}
+PUSH_STATUSES = {"idle", "pending", "pending_window", "running", "succeeded", "failed", "degraded", "skipped"}
 
 MIRROR_RULE_COLUMNS: list[tuple[str, str]] = [
     ("registry", "TEXT NOT NULL DEFAULT 'local'"),
@@ -31,6 +31,12 @@ MIRROR_RULE_COLUMNS: list[tuple[str, str]] = [
     ("allow_latest_push", "INTEGER NOT NULL DEFAULT 0"),
     ("source_credential_id", "TEXT"),
     ("target_credential_id", "TEXT"),
+    ("template_id", "TEXT"),
+    ("notification_policy_id", "TEXT"),
+    ("push_window_id", "TEXT"),
+    ("retention_policy_id", "TEXT"),
+    ("governance_status", "TEXT NOT NULL DEFAULT 'active'"),
+    ("governance_note", "TEXT"),
 ]
 
 SYNC_QUEUE_COLUMNS: list[tuple[str, str]] = [
@@ -164,7 +170,8 @@ def ensure_sqlite_phase1_schema(conn: sqlite3.Connection) -> None:
             mirror_group = COALESCE(NULLIF(mirror_group, ''), 'default'),
             project = COALESCE(NULLIF(project, ''), 'default'),
             environment = COALESCE(NULLIF(environment, ''), 'local'),
-            namespace = COALESCE(NULLIF(namespace, ''), 'library')
+            namespace = COALESCE(NULLIF(namespace, ''), 'library'),
+            governance_status = COALESCE(NULLIF(governance_status, ''), 'active')
         """,
         (stamp,),
     )

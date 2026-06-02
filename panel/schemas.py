@@ -240,3 +240,86 @@ class ScheduledPushPolicyIn(BaseModel):
     allow_latest: bool = False
     source_credential_id: str | None = Field(default=None, max_length=64)
     target_credential_id: str | None = Field(default=None, max_length=64)
+
+
+class MirrorRuleTemplateIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    source_registry_pattern: str = Field(default="*", min_length=1, max_length=255)
+    source_namespace_pattern: str = Field(default="*", min_length=1, max_length=255)
+    source_repo_pattern: str = Field(default="*", min_length=1, max_length=255)
+    target_registry: str = Field(min_length=1, max_length=255)
+    target_namespace_template: str | None = Field(default="{namespace}", max_length=255)
+    mode: str = Field(default="auto_push", max_length=32)
+    check_interval_minutes: int = Field(default=30, ge=1, le=1440)
+    allow_latest_push: bool = False
+    source_credential_id: str | None = Field(default=None, max_length=64)
+    target_credential_id: str | None = Field(default=None, max_length=64)
+    notification_policy_id: str | None = Field(default=None, max_length=64)
+    push_window_id: str | None = Field(default=None, max_length=64)
+    retention_policy_id: str | None = Field(default=None, max_length=64)
+    priority: int = Field(default=100, ge=1, le=10000)
+    enabled: bool = True
+
+
+class TemplatePreviewIn(BaseModel):
+    source: str = Field(min_length=1, max_length=255)
+
+
+class TemplateApplyIn(BaseModel):
+    sources: list[str] = Field(default_factory=list, max_length=500)
+    apply_target: bool = False
+    apply_policy: bool = True
+
+
+class DiscoverySourceIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    source_type: str = Field(default="inline", max_length=32)
+    location: str | None = Field(default=None, max_length=1000)
+    content: str | None = Field(default="", max_length=200000)
+    scan_interval_minutes: int = Field(default=60, ge=1, le=1440)
+    enabled: bool = True
+
+
+class DiscoveryCandidateBatchIn(BaseModel):
+    ids: list[int] = Field(default_factory=list, max_length=500)
+    trigger_sync: bool = False
+    reason: str | None = Field(default="", max_length=500)
+
+
+class NotificationPolicyIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    webhook_url: str | None = Field(default=None, max_length=1000)
+    events: dict = Field(default_factory=dict)
+    min_severity: str = Field(default="warning", max_length=32)
+    dedupe_seconds: int = Field(default=1800, ge=0, le=86400)
+    quiet_hours: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class NotificationPolicyTestIn(BaseModel):
+    event_type: str = Field(default="push_failed", max_length=64)
+    severity: str = Field(default="warning", max_length=32)
+    payload: dict = Field(default_factory=dict)
+
+
+class PushWindowIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    timezone: str = Field(default="Asia/Shanghai", max_length=64)
+    allow_windows: list[dict] = Field(default_factory=list, max_length=32)
+    freeze_windows: list[dict] = Field(default_factory=list, max_length=32)
+    enabled: bool = True
+
+
+class BulkOperationIn(BaseModel):
+    operation_type: str = Field(min_length=1, max_length=64)
+    sources: list[str] = Field(default_factory=list, max_length=500)
+    params: dict = Field(default_factory=dict)
+
+
+class MirrorManualPushIn(MirrorPushIn):
+    confirm_bypass_window: bool = False
+    bypass_reason: str | None = Field(default="", max_length=500)

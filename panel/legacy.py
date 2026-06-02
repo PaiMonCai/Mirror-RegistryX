@@ -1031,7 +1031,8 @@ def mirror_rule_rows(enabled: bool | None = None) -> list[dict]:
                mode, check_interval_minutes, next_check_at, last_checked_at, last_source_digest,
                last_target_digest, last_change_at, last_push_at, pending_push_digest, pending_push_target,
                push_status, check_failures, push_failures, next_push_at, last_error, allow_latest_push,
-               source_credential_id, target_credential_id, updated_at
+               source_credential_id, target_credential_id, template_id, notification_policy_id,
+               push_window_id, retention_policy_id, governance_status, governance_note, updated_at
         FROM mirrors
         {where}
         ORDER BY source
@@ -1054,7 +1055,8 @@ def mirror_rule_by_source(source: str) -> dict | None:
                mode, check_interval_minutes, next_check_at, last_checked_at, last_source_digest,
                last_target_digest, last_change_at, last_push_at, pending_push_digest, pending_push_target,
                push_status, check_failures, push_failures, next_push_at, last_error, allow_latest_push,
-               source_credential_id, target_credential_id, updated_at
+               source_credential_id, target_credential_id, template_id, notification_policy_id,
+               push_window_id, retention_policy_id, governance_status, governance_note, updated_at
         FROM mirrors
         WHERE source = ?
         """,
@@ -1109,6 +1111,12 @@ def public_mirror_rule(row: dict, index: int = 0) -> dict:
         "allow_latest_push": bool(row.get("allow_latest_push")),
         "source_credential_id": row.get("source_credential_id") or "",
         "target_credential_id": row.get("target_credential_id") or "",
+        "template_id": row.get("template_id") or "",
+        "notification_policy_id": row.get("notification_policy_id") or "",
+        "push_window_id": row.get("push_window_id") or "",
+        "retention_policy_id": row.get("retention_policy_id") or "",
+        "governance_status": row.get("governance_status") or "active",
+        "governance_note": row.get("governance_note") or "",
         "digest": short_digest(digest),
         "synced": bool(digest),
         "last_status": last_item.get("status") if last_item else "",
@@ -1275,6 +1283,9 @@ def extract_text_images(content: str) -> list[dict]:
         if " #" in clean:
             clean = clean.split(" #", 1)[0].strip()
         clean = clean.strip("- ").strip("'\"")
+        if ": " in clean:
+            _, maybe_image = clean.split(": ", 1)
+            clean = maybe_image.strip().strip("'\"")
         if clean:
             entries.append({"image": clean, "source_type": "text", "location": f"line {index}"})
     return entries

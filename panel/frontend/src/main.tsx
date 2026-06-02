@@ -9,6 +9,7 @@ import { cx } from './utils';
 import {
   Credentials,
   Dashboard,
+  Governance,
   Logs,
   Mirrors,
   Runs,
@@ -150,6 +151,7 @@ function App() {
       }
       if (view === 'credentials') await loadCredentials();
       if (view === 'storage') await loadStorage();
+      if (view === 'governance') await loadMirrors();
       if (view === 'operations') await loadOperations();
       if (view === 'logs') await loadLogs();
       if (view === 'settings') await loadSettings();
@@ -248,6 +250,7 @@ function App() {
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
+        {view === 'governance' && <Governance mirrors={mirrors} api={api} reloadMirrors={loadMirrors} notify={notify} />}
         {view === 'operations' && <Operations agents={opsAgents} tasks={opsTasks} events={opsEvents} selectedTask={selectedOpsTask} setSelectedTask={setSelectedOpsTask} api={api} reload={loadOperations} notify={notify} />}
         {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
           {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}

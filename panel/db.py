@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS mirrors (
     allow_latest_push INTEGER NOT NULL DEFAULT 0,
     source_credential_id TEXT,
     target_credential_id TEXT,
+    template_id TEXT,
+    notification_policy_id TEXT,
+    push_window_id TEXT,
+    retention_policy_id TEXT,
+    governance_status TEXT NOT NULL DEFAULT 'active',
+    governance_note TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -315,6 +321,130 @@ CREATE INDEX IF NOT EXISTS idx_ops_tasks_status_created ON ops_tasks(status, cre
 CREATE INDEX IF NOT EXISTS idx_ops_tasks_agent_status ON ops_tasks(agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_ops_task_events_task_created ON ops_task_events(task_id, created_at);
 
+CREATE TABLE IF NOT EXISTS mirror_rule_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_registry_pattern TEXT NOT NULL DEFAULT '*',
+    source_namespace_pattern TEXT NOT NULL DEFAULT '*',
+    source_repo_pattern TEXT NOT NULL DEFAULT '*',
+    target_registry TEXT NOT NULL,
+    target_namespace_template TEXT,
+    mode TEXT NOT NULL DEFAULT 'auto_push',
+    check_interval_minutes INTEGER NOT NULL DEFAULT 30,
+    allow_latest_push INTEGER NOT NULL DEFAULT 0,
+    source_credential_id TEXT,
+    target_credential_id TEXT,
+    notification_policy_id TEXT,
+    push_window_id TEXT,
+    retention_policy_id TEXT,
+    priority INTEGER NOT NULL DEFAULT 100,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discovery_sources (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    location TEXT,
+    content TEXT,
+    scan_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_scanned_at TEXT,
+    next_scan_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discovery_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    source_image TEXT NOT NULL,
+    location TEXT,
+    recommended_target TEXT,
+    recommended_template_id TEXT,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    existing_rule_source TEXT,
+    ignored_reason TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_policies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    webhook_url_encrypted TEXT,
+    events_json TEXT NOT NULL DEFAULT '{}',
+    min_severity TEXT NOT NULL DEFAULT 'warning',
+    dedupe_seconds INTEGER NOT NULL DEFAULT 1800,
+    quiet_hours_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS push_windows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    allow_windows_json TEXT NOT NULL DEFAULT '[]',
+    freeze_windows_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bulk_operations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    requested_by TEXT NOT NULL DEFAULT 'panel',
+    total INTEGER NOT NULL DEFAULT 0,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS bulk_operation_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id INTEGER NOT NULL,
+    mirror_source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(operation_id) REFERENCES bulk_operations(id)
+);
+
+CREATE TABLE IF NOT EXISTS notification_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id TEXT,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    dedupe_key TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_status ON discovery_candidates(status, last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_candidates_source_image ON discovery_candidates(source_id, source_image);
+CREATE INDEX IF NOT EXISTS idx_bulk_operation_items_operation ON bulk_operation_items(operation_id);
+CREATE INDEX IF NOT EXISTS idx_notification_events_policy ON notification_events(policy_id, created_at);
+
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     password_hash TEXT NOT NULL,
@@ -362,6 +492,12 @@ POSTGRES_SCHEMA_STATEMENTS = [
         allow_latest_push INTEGER NOT NULL DEFAULT 0,
         source_credential_id VARCHAR(64),
         target_credential_id VARCHAR(64),
+        template_id VARCHAR(64),
+        notification_policy_id VARCHAR(64),
+        push_window_id VARCHAR(64),
+        retention_policy_id VARCHAR(64),
+        governance_status VARCHAR(32) NOT NULL DEFAULT 'active',
+        governance_note TEXT,
         updated_at VARCHAR(64) NOT NULL
     )
     """,
@@ -623,6 +759,132 @@ POSTGRES_SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS mirror_rule_templates (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        source_registry_pattern VARCHAR(255) NOT NULL DEFAULT '*',
+        source_namespace_pattern VARCHAR(255) NOT NULL DEFAULT '*',
+        source_repo_pattern VARCHAR(255) NOT NULL DEFAULT '*',
+        target_registry VARCHAR(255) NOT NULL,
+        target_namespace_template VARCHAR(255),
+        mode VARCHAR(32) NOT NULL DEFAULT 'auto_push',
+        check_interval_minutes INTEGER NOT NULL DEFAULT 30,
+        allow_latest_push INTEGER NOT NULL DEFAULT 0,
+        source_credential_id VARCHAR(64),
+        target_credential_id VARCHAR(64),
+        notification_policy_id VARCHAR(64),
+        push_window_id VARCHAR(64),
+        retention_policy_id VARCHAR(64),
+        priority INTEGER NOT NULL DEFAULT 100,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS discovery_sources (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        source_type VARCHAR(32) NOT NULL,
+        location TEXT,
+        content TEXT,
+        scan_interval_minutes INTEGER NOT NULL DEFAULT 60,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_scanned_at VARCHAR(64),
+        next_scan_at VARCHAR(64),
+        last_error TEXT,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS discovery_candidates (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        source_id VARCHAR(64) NOT NULL,
+        source_image VARCHAR(255) NOT NULL,
+        location TEXT,
+        recommended_target VARCHAR(255),
+        recommended_template_id VARCHAR(64),
+        action VARCHAR(32) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        existing_rule_source VARCHAR(255),
+        ignored_reason TEXT,
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        first_seen_at VARCHAR(64) NOT NULL,
+        last_seen_at VARCHAR(64) NOT NULL,
+        decided_at VARCHAR(64),
+        decided_by VARCHAR(120),
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS notification_policies (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        webhook_url_encrypted TEXT,
+        events_json TEXT NOT NULL DEFAULT '{}',
+        min_severity VARCHAR(32) NOT NULL DEFAULT 'warning',
+        dedupe_seconds INTEGER NOT NULL DEFAULT 1800,
+        quiet_hours_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS push_windows (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai',
+        allow_windows_json TEXT NOT NULL DEFAULT '[]',
+        freeze_windows_json TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS bulk_operations (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        operation_type VARCHAR(64) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        params_json TEXT NOT NULL DEFAULT '{}',
+        requested_by VARCHAR(120) NOT NULL DEFAULT 'panel',
+        total INTEGER NOT NULL DEFAULT 0,
+        succeeded INTEGER NOT NULL DEFAULT 0,
+        failed INTEGER NOT NULL DEFAULT 0,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        finished_at VARCHAR(64)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS bulk_operation_items (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        operation_id INTEGER NOT NULL,
+        mirror_source VARCHAR(255) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        message TEXT,
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS notification_events (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        policy_id VARCHAR(64),
+        event_type VARCHAR(64) NOT NULL,
+        severity VARCHAR(32) NOT NULL,
+        status VARCHAR(32) NOT NULL,
+        reason TEXT,
+        dedupe_key VARCHAR(255),
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS users (
         username VARCHAR(120) PRIMARY KEY,
         password_hash TEXT NOT NULL,
@@ -646,6 +908,15 @@ MYSQL_SCHEMA_STATEMENTS = [
     statement.replace("INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY", "INTEGER PRIMARY KEY AUTO_INCREMENT")
     .replace("key VARCHAR(255) PRIMARY KEY", "`key` VARCHAR(255) PRIMARY KEY")
     for statement in POSTGRES_SCHEMA_STATEMENTS
+]
+
+EXTERNAL_MIRROR_PHASE3_COLUMNS = [
+    ("template_id", "VARCHAR(64)"),
+    ("notification_policy_id", "VARCHAR(64)"),
+    ("push_window_id", "VARCHAR(64)"),
+    ("retention_policy_id", "VARCHAR(64)"),
+    ("governance_status", "VARCHAR(32) NOT NULL DEFAULT 'active'"),
+    ("governance_note", "TEXT"),
 ]
 
 
@@ -720,6 +991,33 @@ def init_db(conn: sqlite3.Connection) -> None:
     run_migrations(conn)
 
 
+def ensure_external_mirror_phase3_columns(conn, backend: str) -> None:
+    if backend == "mysql":
+        rows = conn.execute(
+            text(
+                """
+                SELECT COLUMN_NAME AS column_name
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mirrors'
+                """
+            )
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = CURRENT_SCHEMA() AND table_name = 'mirrors'
+                """
+            )
+        ).fetchall()
+    columns = {str(row._mapping["column_name"]) for row in rows}
+    for name, definition in EXTERNAL_MIRROR_PHASE3_COLUMNS:
+        if name not in columns:
+            conn.execute(text(f"ALTER TABLE mirrors ADD COLUMN {name} {definition}"))
+
+
 def external_engine():
     url = database_url()
     if url in ENGINES:
@@ -732,6 +1030,7 @@ def external_engine():
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+        ensure_external_mirror_phase3_columns(conn, backend)
     ENGINES[url] = engine
     return engine
 

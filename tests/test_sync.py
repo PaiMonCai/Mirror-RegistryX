@@ -497,6 +497,62 @@ def test_mirror_check_auto_push_enqueues_push_on_digest_change(tmp_path, monkeyp
     assert event == {"type": "change_detected", "status": "succeeded", "old_digest": "sha256:old", "new_digest": "sha256:new"}
 
 
+def test_mirror_check_respects_push_window_and_releases_pending_push(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:stable",
+                    "mode": "auto_push",
+                }
+            ]
+        }
+    )
+    now = sync_main.now_iso()
+    sync_main.db_write(
+        """
+        INSERT INTO push_windows(id, name, timezone, allow_windows_json, freeze_windows_json, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        ("freeze-all", "Freeze All", "Asia/Shanghai", "[]", '[{"days":[],"start":"00:00","end":"23:59"}]', now, now),
+    )
+    sync_main.db_write(
+        "UPDATE mirrors SET last_source_digest = ?, next_check_at = ?, push_window_id = ? WHERE source = ?",
+        ("sha256:old", "2024-01-01T00:00:00+00:00", "freeze-all", "docker.io/library/busybox:latest"),
+    )
+    sync_main.enqueue_rule_queue_task("check", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), force=True)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:new-window", ""))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    push_count = sync_main.db_one("SELECT COUNT(*) AS count FROM sync_queue WHERE task_type = 'push'")["count"]
+    wait_event = sync_main.db_one("SELECT type, status, new_digest FROM mirror_events WHERE type = 'push_window_wait'")
+    assert rule["pending_push_digest"] == "sha256:new-window"
+    assert rule["push_status"] == "pending_window"
+    assert rule["next_push_at"]
+    assert push_count == 0
+    assert wait_event == {"type": "push_window_wait", "status": "pending_window", "new_digest": "sha256:new-window"}
+
+    sync_main.db_write("UPDATE push_windows SET freeze_windows_json = ? WHERE id = ?", ("[]", "freeze-all"))
+    assert sync_main.enqueue_pending_window_pushes() == 1
+    released = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    push = sync_main.db_one("SELECT task_type, status, digest FROM sync_queue WHERE task_type = 'push'")
+    release_event = sync_main.db_one("SELECT type, status, new_digest FROM mirror_events WHERE type = 'push_window_released'")
+    assert released["push_status"] == "pending"
+    assert released["next_push_at"] is None
+    assert push == {"task_type": "push", "status": "queued", "digest": "sha256:new-window"}
+    assert release_event == {"type": "push_window_released", "status": "pending", "new_digest": "sha256:new-window"}
+
+
 def test_mirror_check_monitor_only_records_change_without_push(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
