@@ -1,9 +1,10 @@
 $ErrorActionPreference = "Stop"
 
 python scripts\verify.py
-python -m py_compile scripts\verify.py scripts\reset-admin-password.py sync\sync.py panel\main.py panel\password_reset.py tests\test_panel.py tests\test_sync.py
+python -m py_compile scripts\verify.py scripts\reset-admin-password.py sync\sync.py ops_agent\agent.py mirror_registry_core\ops_agent.py panel\main.py panel\password_reset.py tests\test_panel.py tests\test_sync.py tests\test_ops_agent.py
 
 if (Get-Command npm.cmd -ErrorAction SilentlyContinue) {
+    npm.cmd --prefix panel run typecheck
     npm.cmd run build
 } else {
     Write-Warning "npm.cmd is not available. Skipping frontend build."

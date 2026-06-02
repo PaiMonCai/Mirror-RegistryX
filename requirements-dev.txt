@@ -1,3 +1,4 @@
 -r panel/requirements.txt
 -r sync/requirements.txt
+-r ops-agent/requirements.txt
 pytest==8.2.2

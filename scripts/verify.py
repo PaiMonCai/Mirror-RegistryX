@@ -55,13 +55,18 @@ def require_paths() -> None:
         "panel/static/index.html",
         "sync/worker.py",
         "sync/sync.py",
+        "ops_agent/agent.py",
+        "ops-agent/Dockerfile",
+        "ops-agent/requirements.txt",
         "mirror_registry_core/config.py",
+        "mirror_registry_core/ops_agent.py",
         "scripts/check-runtime.ps1",
         "scripts/prod-smoke.ps1",
         "scripts/prod-smoke.sh",
         "scripts/reset-admin-password.py",
         "tests/test_panel.py",
         "tests/test_sync.py",
+        "tests/test_ops_agent.py",
     ]
     missing = [path for path in required if not (ROOT / path).exists()]
     if missing:
@@ -71,7 +76,6 @@ def require_paths() -> None:
         "AccessControl.tsx",
         "AuditLogs.tsx",
         "Diagnostics.tsx",
-        "Governance.tsx",
         "InstallUpgrade.tsx",
         "Observability.tsx",
         "Platform.tsx",
@@ -86,7 +90,7 @@ def require_paths() -> None:
 
 
 def require_python_compiles() -> None:
-    for path in [ROOT / "panel", ROOT / "sync", ROOT / "mirror_registry_core", ROOT / "tests", ROOT / "scripts"]:
+    for path in [ROOT / "panel", ROOT / "sync", ROOT / "ops_agent", ROOT / "mirror_registry_core", ROOT / "tests", ROOT / "scripts"]:
         if not compileall.compile_dir(str(path), quiet=1):
             fail(f"{path.relative_to(ROOT)} Python files do not compile")
     ok("Python files compile")
@@ -112,12 +116,20 @@ def require_compose_shape() -> None:
         if "CREDENTIALS_SECRET_KEY" in source:
             fail(f"{name} still passes CREDENTIALS_SECRET_KEY")
 
-    if compose_service_names(compose) != {"registry", "panel", "sync"}:
-        fail("docker-compose.yml service set must be registry, panel, sync")
-    if compose_service_names(dev_compose) != {"registry", "panel", "sync"}:
-        fail("docker-compose.dev.yml service set must be registry, panel, sync")
+    expected_services = {"registry", "panel", "sync", "ops-agent"}
+    if compose_service_names(compose) != expected_services:
+        fail("docker-compose.yml service set must be registry, panel, sync, ops-agent")
+    if compose_service_names(dev_compose) != expected_services:
+        fail("docker-compose.dev.yml service set must be registry, panel, sync, ops-agent")
     if "build:" in compose:
         fail("production docker-compose.yml must pull images instead of building locally")
+    for image in [
+        "ghcr.io/paimoncai/mirror-registryx-panel",
+        "ghcr.io/paimoncai/mirror-registryx-sync",
+        "ghcr.io/paimoncai/mirror-registryx-ops-agent",
+    ]:
+        if image not in compose:
+            fail(f"docker-compose.yml missing published image {image!r}")
     ok("compose files keep the single-node core shape")
 
 
@@ -151,6 +163,8 @@ def require_frontend_core_only() -> None:
         "mirrors",
         "credentials",
         "storage",
+        "governance",
+        "operations",
         "runs",
         "logs",
         "settings",
@@ -165,9 +179,20 @@ def require_frontend_core_only() -> None:
         "/sync-queue",
         "/logs",
         "/settings",
+        "/governance/summary",
+        "/mirror-rule-templates",
+        "/discovery-sources",
+        "/notification-policies",
+        "/push-windows",
+        "/bulk-operations",
+        "/trust/summary",
+        "/releases",
+        "/restore-drills",
+        "/ops-agents",
+        "/ops-tasks",
     ]:
         if snippet not in source:
-            fail(f"frontend missing core snippet {snippet!r}")
+            fail(f"frontend missing current surface snippet {snippet!r}")
     for snippet in [
         "tag-protection",
         "retention-policies",
@@ -186,7 +211,7 @@ def require_frontend_core_only() -> None:
             fail(f"frontend still exposes non-core feature {snippet!r}")
     if '<div id="root"></div>' not in read("panel/static/index.html"):
         fail("Vite build output is not present in panel/static/index.html")
-    ok("frontend exposes only core personal-use pages")
+    ok("frontend exposes the current personal-use, governance, trust, and operations pages")
 
 
 def require_backend_core_only() -> None:
@@ -194,15 +219,29 @@ def require_backend_core_only() -> None:
     auth_source = read("panel/auth.py")
     queue_source = read("panel/queue.py")
     ops_source = read("panel/ops.py")
+    ops_agent_source = read("panel/ops_agent.py")
+    governance_source = read("panel/governance.py")
+    trust_source = read("panel/trust.py")
     credentials_source = read("panel/credentials.py")
     test_source = read("tests/test_panel.py")
+
+    for snippet in [
+        "_ops_agent",
+        "_ops",
+        "_governance",
+        "_trust",
+        "_mirrors",
+        "_storage",
+        "_credentials",
+    ]:
+        if snippet not in app_source:
+            fail(f"panel/app.py missing current router {snippet!r}")
 
     for snippet in [
         "_backup_migration",
         "_install_upgrade",
         "_observability",
         "_audit",
-        "_governance",
     ]:
         if snippet in app_source:
             fail(f"panel/app.py still mounts non-core router {snippet!r}")
@@ -219,7 +258,6 @@ def require_backend_core_only() -> None:
             fail(f"auth/queue still exposes non-core route {snippet!r}")
 
     for snippet in [
-        "/api/ops",
         "/api/diagnostics",
         "/api/security-guide",
         "/api/security-checks",
@@ -236,7 +274,27 @@ def require_backend_core_only() -> None:
 
     if "test_non_core_api_routes_are_not_exposed" not in test_source:
         fail("tests must verify hidden non-core API routes are not exposed")
-    ok("backend API exposes only the personal-use core surface")
+    for source_name, source, snippets in [
+        (
+            "panel/ops_agent.py",
+            ops_agent_source,
+            ["/ops-agents", "/ops-tasks", "/ops-agent/heartbeat", "/ops-agent/claim"],
+        ),
+        (
+            "panel/governance.py",
+            governance_source,
+            ["/api/governance/summary", "/api/mirror-rule-templates", "/api/discovery-sources", "/api/bulk-operations"],
+        ),
+        (
+            "panel/trust.py",
+            trust_source,
+            ["/releases", "/trust/summary", "/restore-drills"],
+        ),
+    ]:
+        for snippet in snippets:
+            if snippet not in source:
+                fail(f"{source_name} missing current route {snippet!r}")
+    ok("backend API exposes the current personal-use, governance, trust, and operations surface")
 
 
 def require_smoke_is_core_only() -> None:
@@ -292,6 +350,8 @@ def require_check_runtime() -> None:
         "python -m py_compile",
         "panel\\password_reset.py",
         "scripts\\reset-admin-password.py",
+        "ops_agent\\agent.py",
+        "tests\\test_ops_agent.py",
         "python -m pytest",
         "docker compose config",
     ]:

@@ -37,7 +37,7 @@ EOF
   exit 2
 fi
 
-if [ ! -f "$ROOT/.venv/.requirements-dev.installed" ] || [ requirements-dev.txt -nt "$ROOT/.venv/.requirements-dev.installed" ] || [ panel/requirements.txt -nt "$ROOT/.venv/.requirements-dev.installed" ] || [ sync/requirements.txt -nt "$ROOT/.venv/.requirements-dev.installed" ]; then
+if [ ! -f "$ROOT/.venv/.requirements-dev.installed" ] || [ requirements-dev.txt -nt "$ROOT/.venv/.requirements-dev.installed" ] || [ panel/requirements.txt -nt "$ROOT/.venv/.requirements-dev.installed" ] || [ sync/requirements.txt -nt "$ROOT/.venv/.requirements-dev.installed" ] || [ ops-agent/requirements.txt -nt "$ROOT/.venv/.requirements-dev.installed" ]; then
   echo "[setup] installing Python dependencies into .venv"
   "$VENV_PYTHON" -m pip install --upgrade pip
   "$VENV_PIP" install -r requirements-dev.txt
@@ -50,7 +50,7 @@ if [ ! -d "$ROOT/panel/node_modules" ] || [ panel/package-lock.json -nt "$ROOT/p
 fi
 
 echo "[check] python syntax"
-"$VENV_PYTHON" -m compileall -q mirror_registry_core panel sync tests scripts
+"$VENV_PYTHON" -m compileall -q mirror_registry_core panel sync ops_agent tests scripts
 
 echo "[check] frontend typecheck"
 npm --prefix panel run typecheck

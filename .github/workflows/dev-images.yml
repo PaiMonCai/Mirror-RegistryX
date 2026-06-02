@@ -23,8 +23,83 @@ env:
   IMAGE_NAMESPACE: paimoncai
 
 jobs:
+  prepare:
+    name: Prepare dev build
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.dev.outputs.checkout_ref }}
+      image_tag: ${{ steps.dev.outputs.image_tag }}
+      ref_label: ${{ steps.dev.outputs.ref_label }}
+
+    steps:
+      - name: Select dev source and image tag
+        id: dev
+        shell: bash
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          INPUT_REF_LABEL: ${{ inputs.ref_label }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            echo "checkout_ref=dev" >> "$GITHUB_OUTPUT"
+            echo "image_tag=nightly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+            echo "ref_label=dev nightly" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=$GITHUB_REF" >> "$GITHUB_OUTPUT"
+            echo "image_tag=${INPUT_IMAGE_TAG:-dev}" >> "$GITHUB_OUTPUT"
+            echo "ref_label=${INPUT_REF_LABEL:-$GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    name: Verify dev source
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix panel ci --include=dev
+
+      - name: Typecheck frontend
+        run: npm --prefix panel run typecheck
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run project verifier
+        run: python scripts/verify.py
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Validate compose files
+        run: |
+          docker compose config
+          docker compose -f docker-compose.dev.yml config
+
   build:
     name: Build ${{ matrix.image }}
+    needs:
+      - prepare
+      - verify
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -34,24 +109,20 @@ jobs:
             dockerfile: panel/Dockerfile
           - image: mirror-registryx-sync
             dockerfile: sync/Dockerfile
+          - image: mirror-registryx-ops-agent
+            dockerfile: ops-agent/Dockerfile
 
     steps:
-      - name: Select image tag
-        id: dev_tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "image_tag=nightly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ inputs.image_tag }}" ]; then
-            echo "image_tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "image_tag=dev" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout dev source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'dev' || github.ref }}
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Resolve source revision
+        id: source
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Write build summary
         shell: bash
@@ -59,8 +130,9 @@ jobs:
           {
             echo "### Dev image build"
             echo ""
-            echo "- Ref: ${{ inputs.ref_label || github.ref_name }}"
-            echo "- Tag: ${{ steps.dev_tag.outputs.image_tag }}"
+            echo "- Ref: ${{ needs.prepare.outputs.ref_label }}"
+            echo "- SHA: ${{ steps.source.outputs.sha }}"
+            echo "- Tag: ${{ needs.prepare.outputs.image_tag }}"
             echo "- Image: ${{ matrix.image }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -82,8 +154,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.dev_tag.outputs.image_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:dev-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ needs.prepare.outputs.image_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:dev-${{ steps.source.outputs.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}

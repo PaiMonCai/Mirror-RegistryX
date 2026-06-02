@@ -87,6 +87,7 @@ if ([string]::IsNullOrWhiteSpace($SmokeResultPath) -or -not (Test-Path -LiteralP
 
 if (-not $SkipBuildChecks) {
     Invoke-RequiredCommand "python scripts\verify.py" { python scripts\verify.py }
+    Invoke-RequiredCommand "npm.cmd --prefix panel run typecheck" { npm.cmd --prefix panel run typecheck }
     Invoke-RequiredCommand "npm.cmd run build" { npm.cmd run build }
     Invoke-RequiredCommand "python -m pytest" { python -m pytest }
 } else {

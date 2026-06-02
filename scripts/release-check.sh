@@ -23,7 +23,7 @@ Options:
   --allow-dirty               allow uncommitted worktree changes
   --skip-tests                skip scripts/test-local.sh (not for final release)
   --skip-docker-config        skip docker compose config validation
-  --with-docker-build         build panel and sync Docker images locally
+  --with-docker-build         build panel, sync, and ops-agent Docker images locally
   --with-smoke                run scripts/prod-smoke.sh after local checks
   --smoke-args "ARGS"         extra args passed to scripts/prod-smoke.sh
   -h, --help                  show this help
@@ -95,7 +95,8 @@ if [[ "$WITH_DOCKER_BUILD" == "1" ]]; then
   tag="${VERSION:-release-check}"
   docker build -f panel/Dockerfile -t "mirror-registryx-panel:${tag}" .
   docker build -f sync/Dockerfile -t "mirror-registryx-sync:${tag}" .
-  ok "panel and sync images built"
+  docker build -f ops-agent/Dockerfile -t "mirror-registryx-ops-agent:${tag}" .
+  ok "panel, sync, and ops-agent images built"
 fi
 
 if [[ "$WITH_SMOKE" == "1" ]]; then
