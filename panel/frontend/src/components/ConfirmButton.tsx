@@ -7,12 +7,14 @@ export function ConfirmButton({
   className = 'danger',
   onConfirm,
   title,
+  disabled = false,
 }: {
   children: ReactNode;
   confirmText?: string;
   className?: string;
   onConfirm: () => void | Promise<void>;
   title?: string;
+  disabled?: boolean;
 }) {
   const [armed, setArmed] = useState(false);
 
@@ -23,6 +25,7 @@ export function ConfirmButton({
   }, [armed]);
 
   async function click() {
+    if (disabled) return;
     if (!armed) {
       setArmed(true);
       return;
@@ -32,7 +35,7 @@ export function ConfirmButton({
   }
 
   return (
-    <button className={cx(className, armed && 'confirming')} onClick={click} title={title || confirmText}>
+    <button className={cx(className, armed && 'confirming')} onClick={click} title={title || confirmText} disabled={disabled}>
       {armed ? confirmText : children}
     </button>
   );

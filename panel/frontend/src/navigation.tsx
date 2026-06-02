@@ -8,7 +8,7 @@ export const viewMeta: Record<View, { title: string; subtitle: string; icon: Rea
   credentials: { title: '凭据', subtitle: '保存 Docker Hub、GHCR 或目标仓库的账号 token。', icon: <>⊞</> },
   storage: { title: '存储', subtitle: '查看本地仓库占用、删除标记和清理命令。', icon: <>◫</> },
   logs: { title: '日志', subtitle: '同步日志和事件记录。', icon: <>≡</> },
-  settings: { title: '设置', subtitle: '同步间隔、并发、重试和通知。', icon: <>⚙</> },
+  settings: { title: '设置', subtitle: '同步间隔、并发、重试和飞书通知。', icon: <>⚙</> },
 };
 
 export const navGroups: Array<{ label: string; views: View[] }> = [

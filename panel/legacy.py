@@ -3239,6 +3239,46 @@ async def fetch_manifest(client: httpx.AsyncClient, registry_url: str, repo: str
     return response.json(), digest
 
 
+async def registry_manifest_digest_for_delete(client: httpx.AsyncClient, registry_url: str, repo: str, tag: str) -> str:
+    try:
+        response = await client.get(
+            f"{registry_url}/v2/{repo}/manifests/{tag}",
+            headers={"Accept": MANIFEST_ACCEPT},
+            timeout=15,
+        )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(504, f"Registry manifest 读取超时: {repo}:{tag}") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f"Registry manifest 读取失败: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise HTTPException(404, f"Registry manifest 不存在: {repo}:{tag}")
+    if response.status_code >= 400:
+        raise HTTPException(response.status_code if response.status_code < 500 else 502, f"Registry manifest 读取失败: HTTP {response.status_code}")
+
+    digest = (response.headers.get("Docker-Content-Digest") or "").strip().lower()
+    if not digest:
+        raise HTTPException(502, "Registry 未返回 Docker-Content-Digest，无法删除 manifest")
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+        raise HTTPException(502, "Registry 返回的 manifest digest 格式不合法")
+    return digest
+
+
+async def delete_registry_manifest(client: httpx.AsyncClient, registry_url: str, repo: str, digest: str) -> int:
+    try:
+        response = await client.delete(f"{registry_url}/v2/{repo}/manifests/{digest}", timeout=15)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(504, f"Registry manifest 删除超时: {repo}@{digest}") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f"Registry manifest 删除失败: {exc.__class__.__name__}") from exc
+
+    if response.status_code in {200, 202}:
+        return response.status_code
+    if response.status_code == 404:
+        raise HTTPException(404, f"Registry manifest 不存在或已被删除: {repo}@{digest}")
+    raise HTTPException(response.status_code if response.status_code < 500 else 502, f"Registry manifest 删除失败: HTTP {response.status_code}")
+
+
 async def recalculate_storage_stats() -> dict:
     registry_url = get_registry_url()
     images = await list_registry_images()
@@ -3277,7 +3317,7 @@ def estimate_repo_size(repo: str) -> int | None:
 
 def gc_guide() -> dict:
     return {
-        "summary": "删除标记只记录清理意图。真正释放空间需要先删除 Registry manifest，再停 registry 执行 garbage-collect。",
+        "summary": "manifest 删除后，真正释放磁盘空间仍需执行 Registry garbage-collect。",
         "commands": [
             "docker compose pull",
             "docker compose stop registry",
@@ -4080,6 +4120,44 @@ def unmark_image_for_delete(mark_id: int):
     db_execute("DELETE FROM deletion_marks WHERE id = ?", (mark_id,))
     audit_log("unmark_delete", "deletion_mark", str(mark_id), {})
     return {"ok": True}
+
+
+@app.post("/api/storage/delete-mark/{mark_id}/apply", dependencies=[Depends(require_write_token)])
+async def apply_image_delete_mark(mark_id: int):
+    mark = db_one("SELECT id, repo, tag, reason, created_at FROM deletion_marks WHERE id = ?", (mark_id,))
+    if not mark:
+        raise HTTPException(404, "删除标记不存在，无法执行清理")
+
+    repo, tag = validate_repo_tag(mark["repo"], mark["tag"])
+    protection = assert_tag_mutation_allowed(repo, tag, "manifest-delete")
+    registry_url = get_registry_url().rstrip("/")
+    async with httpx.AsyncClient() as client:
+        manifest_digest = await registry_manifest_digest_for_delete(client, registry_url, repo, tag)
+        http_status = await delete_registry_manifest(client, registry_url, repo, manifest_digest)
+
+    db_execute("DELETE FROM deletion_marks WHERE id = ?", (mark_id,))
+    db_execute("DELETE FROM storage_stats WHERE repo = ? AND tag = ?", (repo, tag))
+    audit_log(
+        "apply_delete",
+        "deletion_mark",
+        str(mark_id),
+        {
+            "repo": repo,
+            "tag": tag,
+            "manifest_digest": manifest_digest,
+            "registry_url": mask_url(registry_url),
+            "http_status": http_status,
+            "protection": protection,
+        },
+    )
+    return {
+        "ok": True,
+        "repo": repo,
+        "tag": tag,
+        "manifest_digest": manifest_digest,
+        "deleted_mark_id": mark_id,
+        "message": "manifest 已删除；释放磁盘空间仍需执行 Registry garbage-collect",
+    }
 
 
 def security_check_item(name: str, status: str, message: str, suggestion: str = "", details: dict | None = None) -> dict:

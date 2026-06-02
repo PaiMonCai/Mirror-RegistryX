@@ -8,6 +8,7 @@ import {
   ListChecks,
   Pause,
   Play,
+  PlusCircle,
   RefreshCw,
   RotateCcw,
   Search,
@@ -111,7 +112,7 @@ export function Mirrors({ mirrors, credentials, search, setSearch, api, reload, 
           <input placeholder="localhost:5000/library/busybox:latest" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} />
           <select value={form.source_credential_id} onChange={(e) => setForm({ ...form, source_credential_id: e.target.value })}><option value="">源凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
           <select value={form.target_credential_id} onChange={(e) => setForm({ ...form, target_credential_id: e.target.value })}><option value="">目标凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-          <button className="primary" onClick={() => api('POST', '/mirrors', form).then(() => { setForm({ source: '', target: '', source_credential_id: '', target_credential_id: '' }); reload(); notify('镜像已添加'); })}>添加</button>
+          <button className="primary" onClick={() => api('POST', '/mirrors', form).then(() => { setForm({ source: '', target: '', source_credential_id: '', target_credential_id: '' }); reload(); notify('镜像已添加'); })}><PlusCircle size={16} />添加镜像</button>
         </div>
       </Panel>
       <Panel title="同步预检">
@@ -210,10 +211,10 @@ export function Mirrors({ mirrors, credentials, search, setSearch, api, reload, 
                   <td className="mirror-cell">
                     <div className="row-actions mirror-actions">
                       <button onClick={() => preflightMirror(m)}><ListChecks size={14} />预检</button>
-                      <button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已入队'))}>同步</button>
+                      <button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已入队'))}><Play size={14} />立即同步</button>
                       <button onClick={() => downloadArtifact(m)}><Download size={14} />导出 artifact</button>
-                      <ConfirmButton confirmText="确认重置" className="danger" onConfirm={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</ConfirmButton>
-                      <ConfirmButton confirmText="确认删除" onConfirm={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></ConfirmButton>
+                      <ConfirmButton confirmText="确认重置状态" className="danger" onConfirm={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}><RotateCcw size={14} />重置状态</ConfirmButton>
+                      <ConfirmButton confirmText="确认删除配置" onConfirm={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} />删除配置</ConfirmButton>
                     </div>
                   </td>
                 </tr>

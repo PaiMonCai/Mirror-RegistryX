@@ -1404,15 +1404,27 @@ def effective_webhook_url(config: dict) -> str:
     return str(settings.get("notify_webhook_url") or NOTIFY_WEBHOOK_URL).strip()
 
 
-def webhook_dedupe_key(event_type: str) -> str:
-    return hashlib.sha256(event_type.encode("utf-8")).hexdigest()[:16]
+def webhook_dedupe_key(event_type: str, payload: dict | None = None) -> str:
+    source = ""
+    target = ""
+    digest = ""
+    if isinstance(payload, dict):
+        source = str(payload.get("source") or "")
+        target = str(payload.get("target") or "")
+        digest = str(payload.get("new_digest") or payload.get("digest") or "")
+    raw = json.dumps(
+        {"event": event_type, "source": source, "target": target, "digest": digest},
+        ensure_ascii=False,
+        sort_keys=True,
+    ) if source or target or digest else event_type
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def should_send_webhook_event(event_type: str) -> bool:
+def should_send_webhook_event(event_type: str, payload: dict | None = None) -> bool:
     if NOTIFY_DEDUPE_SECONDS <= 0:
         return True
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    fingerprint = webhook_dedupe_key(event_type)
+    fingerprint = webhook_dedupe_key(event_type, payload)
     state_key = f"notify_last_{fingerprint}"
     try:
         last_value = runtime_value(state_key, "")
@@ -1420,6 +1432,7 @@ def should_send_webhook_event(event_type: str) -> bool:
         if last_sent_at != datetime.min.replace(tzinfo=timezone.utc) and (now - last_sent_at).total_seconds() < NOTIFY_DEDUPE_SECONDS:
             set_runtime_state("notify_last_suppressed_at", now.isoformat())
             set_runtime_state("notify_last_suppressed_event", event_type)
+            set_runtime_state("notify_last_suppressed_key", fingerprint)
             logger.info("webhook 通知已去重: %s", event_type)
             return False
         set_runtime_state(state_key, now.isoformat())
@@ -1432,7 +1445,7 @@ def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> Non
     url = webhook_url or NOTIFY_WEBHOOK_URL
     if not url:
         return
-    if not should_send_webhook_event(event_type):
+    if not should_send_webhook_event(event_type, payload):
         return
     body = json.dumps(
         {
@@ -1456,8 +1469,25 @@ def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> Non
             logger.info("webhook 通知已发送: %s HTTP %s", event_type, response.status)
         set_runtime_state("notify_last_sent_at", now_iso())
         set_runtime_state("notify_last_sent_event", event_type)
+        set_runtime_state("notify_last_sent_key", webhook_dedupe_key(event_type, payload))
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.warning("webhook 通知失败: %s", exc)
+
+
+def notify_mirror_update_detected(run_id: int, source: str, target: str, old_digest: str | None, new_digest: str, webhook_url: str = "") -> None:
+    notify_webhook(
+        "mirror_update_detected",
+        {
+            "source": source,
+            "target": target,
+            "old_digest": old_digest or "",
+            "new_digest": new_digest,
+            "run_id": run_id,
+            "detected_at": now_iso(),
+            "status": "detected",
+        },
+        webhook_url,
+    )
 
 
 def check_disk_space(run_id: int | None = None, webhook_url: str = "") -> dict:
@@ -1502,7 +1532,7 @@ def update_heartbeat(interval: int | None = None, concurrency: int | None = None
     upsert_local_worker()
 
 
-def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> str:
+def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int, webhook_url: str = "") -> str:
     started_at = time.monotonic()
     source = mirror["source"]
     target = mirror["target"]
@@ -1568,6 +1598,7 @@ def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> 
         short_new = remote[:19] + "..."
         logger.info("发现更新: %s  %s -> %s", source, short_old, short_new)
         record_event("INFO", f"发现更新: {short_old} -> {short_new}", run_id, source, target)
+        notify_mirror_update_detected(run_id, source, target, cached, remote, webhook_url)
 
         ok, copy_target, copy_error = copy_image(source, target, retry_count=retry_count, authfile=authfile)
         if ok:
@@ -1606,7 +1637,7 @@ def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> 
         remove_temp_authfile(authfile)
 
 
-def process_scheduled_policy(policy: dict, retry_count: int, queue_id: int | None = None) -> dict:
+def process_scheduled_policy(policy: dict, retry_count: int, queue_id: int | None = None, webhook_url: str = "") -> dict:
     source = policy["source"]
     target = policy["target"]
     allow_latest = bool(policy.get("allow_latest"))
@@ -1626,7 +1657,7 @@ def process_scheduled_policy(policy: dict, retry_count: int, queue_id: int | Non
     run_id = create_run(f"scheduled-policy:{policy['id']}", source)
     attach_sync_queue_run(queue_id, run_id)
     state = load_state()
-    result = process_mirror(run_id, mirror, state, retry_count)
+    result = process_mirror(run_id, mirror, state, retry_count, webhook_url)
     status = "completed" if result in {"updated", "skipped"} else "failed"
     update_run(
         run_id,
@@ -1713,7 +1744,7 @@ def sync_all(
 
         try:
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                futures = [executor.submit(process_mirror, run_id, mirror, state, retry_count) for mirror in mirrors]
+                futures = [executor.submit(process_mirror, run_id, mirror, state, retry_count, webhook_url) for mirror in mirrors]
                 for future in as_completed(futures):
                     try:
                         result = future.result()
@@ -1799,7 +1830,7 @@ def process_sync_queue_task(row: dict) -> bool:
                 raise ValueError(f"scheduled policy not found: {policy_id}")
             config = load_config()
             retry_count = setting_int(config, "sync_retry_count", SYNC_RETRY_COUNT, 0, 10)
-            result = process_scheduled_policy(policy, retry_count, queue_id=queue_id)
+            result = process_scheduled_policy(policy, retry_count, queue_id=queue_id, webhook_url=effective_webhook_url(config))
             final_status = "completed" if result["status"] == "completed" else "failed"
             message = str(result.get("message") or final_status)
             result_run_id = result.get("run_id")

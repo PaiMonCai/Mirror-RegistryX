@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { LogOut, Play, Search } from 'lucide-react';
+import { LogOut, Play, PlusCircle, Search } from 'lucide-react';
 import { ApiError, createApiClient, formatApiError } from './api';
 import { LoginScreen } from './components/LoginScreen';
 import { navGroups, viewMeta } from './navigation';
@@ -202,7 +202,7 @@ function App() {
                 <Search size={14} />
                 <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索镜像、仓库…" />
               </label>
-              <button onClick={() => setView('mirrors')}>＋ 镜像配置</button>
+              <button onClick={() => setView('mirrors')}><PlusCircle size={16} />添加镜像</button>
               <button className="primary" onClick={() => action('同步已入队', async () => { await api('POST', '/sync'); await loadStatus(); if (view === 'runs') await loadRuns(); })}>
                 <Play size={16} />立即同步
               </button>

@@ -404,6 +404,109 @@ def test_storage_delete_mark_and_stats(panel_app):
     assert client.post("/api/storage/stats/recalculate").status_code == 200
 
 
+def test_storage_delete_mark_apply_deletes_registry_manifest(panel_app, monkeypatch):
+    client, _, _, _ = panel_app
+    mark = client.post("/api/storage/delete-mark", json={"repo": "library/busybox", "tag": "latest", "reason": "cleanup"}).json()
+
+    import panel.main as panel_main
+
+    manifest_digest = "sha256:" + "d" * 64
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code=200, headers=None):
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None, timeout=None):
+            calls.append(("GET", url, headers, timeout))
+            assert headers["Accept"] == panel_main.MANIFEST_ACCEPT
+            return FakeResponse(200, {"Docker-Content-Digest": manifest_digest})
+
+        async def delete(self, url, timeout=None):
+            calls.append(("DELETE", url, None, timeout))
+            return FakeResponse(202)
+
+    monkeypatch.setattr(panel_main.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(f"/api/storage/delete-mark/{mark['id']}/apply")
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["repo"] == "library/busybox"
+    assert result["tag"] == "latest"
+    assert result["manifest_digest"] == manifest_digest
+    assert calls[0][1] == "http://registry:5000/v2/library/busybox/manifests/latest"
+    assert calls[1][1] == f"http://registry:5000/v2/library/busybox/manifests/{manifest_digest}"
+    assert panel_main.db_one("SELECT id FROM deletion_marks WHERE id = ?", (mark["id"],)) is None
+    assert panel_main.db_one("SELECT id FROM audit_logs WHERE action = 'apply_delete' AND resource_id = ?", (str(mark["id"]),)) is not None
+
+
+def test_storage_delete_mark_apply_rejects_invalid_or_unsafe_cleanup(panel_app, monkeypatch):
+    client, _, _, _ = panel_app
+
+    assert client.post("/api/storage/delete-mark/999/apply").status_code == 404
+
+    import panel.main as panel_main
+
+    protected_mark_id = panel_main.db_execute(
+        "INSERT INTO deletion_marks(repo, tag, reason, created_at) VALUES (?, ?, ?, ?)",
+        ("library/busybox", "v1.0.0", "cleanup", panel_main.now_iso()),
+    )
+    protected = client.post(f"/api/storage/delete-mark/{protected_mark_id}/apply")
+    assert protected.status_code == 409
+    assert "受保护 tag" in protected.json()["message"]
+
+    class FakeResponse:
+        def __init__(self, status_code=200, headers=None):
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    class MissingManifestClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None, timeout=None):
+            return FakeResponse(404)
+
+    missing_mark = client.post("/api/storage/delete-mark", json={"repo": "library/alpine", "tag": "latest", "reason": "cleanup"}).json()
+    monkeypatch.setattr(panel_main.httpx, "AsyncClient", MissingManifestClient)
+    missing = client.post(f"/api/storage/delete-mark/{missing_mark['id']}/apply")
+    assert missing.status_code == 404
+    assert "manifest 不存在" in missing.json()["message"]
+    assert panel_main.db_one("SELECT id FROM deletion_marks WHERE id = ?", (missing_mark["id"],)) is not None
+
+    class DeleteFailedClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None, timeout=None):
+            return FakeResponse(200, {"Docker-Content-Digest": "sha256:" + "e" * 64})
+
+        async def delete(self, url, timeout=None):
+            return FakeResponse(500)
+
+    failed_mark = client.post("/api/storage/delete-mark", json={"repo": "library/redis", "tag": "latest", "reason": "cleanup"}).json()
+    monkeypatch.setattr(panel_main.httpx, "AsyncClient", DeleteFailedClient)
+    failed = client.post(f"/api/storage/delete-mark/{failed_mark['id']}/apply")
+    assert failed.status_code == 502
+    assert "删除失败" in failed.json()["message"]
+    assert panel_main.db_one("SELECT id FROM deletion_marks WHERE id = ?", (failed_mark["id"],)) is not None
+
+
 def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
     client, config_path, _, _ = panel_app
     create = client.post(

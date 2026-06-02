@@ -213,6 +213,46 @@ def test_notify_webhook_deduplicates_repeated_events(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_notify_webhook_deduplicates_by_update_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "http://notify.local/hook")
+    monkeypatch.setenv("NOTIFY_DEDUPE_SECONDS", "1800")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_urlopen(request, timeout=5):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr(sync_main.urllib.request, "urlopen", fake_urlopen)
+
+    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:a"})
+    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:a"})
+    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/nginx:latest", "target": "localhost:5000/library/nginx:latest", "new_digest": "sha256:a"})
+    sync_main.notify_webhook("mirror_update_detected", {"source": "docker.io/library/busybox:latest", "target": "localhost:5000/library/busybox:latest", "new_digest": "sha256:b"})
+
+    assert len(calls) == 3
+    assert [call["payload"]["source"] for call in calls] == [
+        "docker.io/library/busybox:latest",
+        "docker.io/library/nginx:latest",
+        "docker.io/library/busybox:latest",
+    ]
+    assert sync_main.webhook_dedupe_key("mirror_update_detected", calls[0]["payload"]) != sync_main.webhook_dedupe_key("mirror_update_detected", calls[1]["payload"])
+
+
 def test_parse_trigger_accepts_multiple_sources(tmp_path, monkeypatch):
     trigger_path = tmp_path / "data" / ".trigger"
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
@@ -448,6 +488,92 @@ def test_sync_records_tag_written_audit_on_success(tmp_path, monkeypatch):
         row = conn.execute("SELECT action, resource_id, detail FROM audit_logs WHERE action = 'tag_written'").fetchone()
     assert row["resource_id"] == "library/busybox:latest"
     assert "sha256:new" in row["detail"]
+
+
+def test_sync_sends_update_detected_notification_on_digest_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("STATE_PATH", str(tmp_path / "data" / "sync-state.json"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "http://notify.local/hook")
+    monkeypatch.setenv("SYNC_TARGET_REGISTRY", "registry:5000")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_urlopen(request, timeout=5):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr(sync_main.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:new", ""))
+    monkeypatch.setattr(sync_main, "copy_image", lambda source, target, retry_count=0, authfile="": (True, "registry:5000/library/busybox:latest", ""))
+
+    run_id = sync_main.create_run("scheduled")
+    result = sync_main.process_mirror(
+        run_id,
+        {
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
+            "environment": "local",
+        },
+        {"docker.io/library/busybox:latest": "sha256:old"},
+        retry_count=0,
+    )
+
+    assert result == "updated"
+    assert len(calls) == 1
+    body = calls[0]
+    assert body["event"] == "mirror_update_detected"
+    assert body["payload"] == {
+        "source": "docker.io/library/busybox:latest",
+        "target": "localhost:5000/library/busybox:latest",
+        "old_digest": "sha256:old",
+        "new_digest": "sha256:new",
+        "run_id": run_id,
+        "detected_at": body["payload"]["detected_at"],
+        "status": "detected",
+    }
+
+
+def test_sync_does_not_send_update_notification_when_digest_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("STATE_PATH", str(tmp_path / "data" / "sync-state.json"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    notifications = []
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:same", ""))
+    monkeypatch.setattr(sync_main, "notify_mirror_update_detected", lambda *args, **kwargs: notifications.append((args, kwargs)))
+
+    run_id = sync_main.create_run("scheduled")
+    result = sync_main.process_mirror(
+        run_id,
+        {
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
+            "environment": "local",
+        },
+        {"docker.io/library/busybox:latest": "sha256:same"},
+        retry_count=0,
+    )
+
+    assert result == "skipped"
+    assert notifications == []
 
 
 def test_scheduled_policy_runs_due_push_and_updates_status(tmp_path, monkeypatch):
