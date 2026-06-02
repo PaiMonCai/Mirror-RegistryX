@@ -158,6 +158,9 @@ def test_status_and_mirror_crud(panel_app):
 
     mirrors = client.get("/api/mirrors").json()
     assert mirrors[0]["source"] == "docker.io/library/busybox:latest"
+    assert mirrors[0]["mode"] == "auto_push"
+    assert mirrors[0]["push_status"] == "idle"
+    assert mirrors[0]["next_check_at"]
     assert "docker.io/library/busybox:latest" in config_path.read_text(encoding="utf-8")
 
     state_path.write_text(json.dumps({"docker.io/library/busybox:latest": "sha256:abc"}), encoding="utf-8")
@@ -166,6 +169,72 @@ def test_status_and_mirror_crud(panel_app):
 
     assert client.delete("/api/mirrors/0").status_code == 200
     assert client.get("/api/status").json()["total"] == 0
+
+
+def test_mirror_rule_control_endpoints(panel_app):
+    client, config_path, _, _ = panel_app
+    source = "ghcr.io/example/api:v2"
+    expected_target = "mirror.local:5000/apps/api:v2"
+
+    response = client.post(
+        "/api/mirrors",
+        json={
+            "source": source,
+            "target_registry": "mirror.local:5000",
+            "target_namespace": "apps",
+            "mode": "monitor_only",
+            "check_interval_minutes": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    mirror = response.json()["mirror"]
+    assert mirror["target"] == expected_target
+    assert mirror["mode"] == "monitor_only"
+    assert mirror["check_interval_minutes"] == 12
+    assert mirror["enabled"] is True
+
+    updated = client.put(
+        "/api/mirrors/0",
+        json={
+            "source": source,
+            "target_registry": "mirror.local:5000",
+            "target_namespace": "apps",
+            "mode": "auto_push",
+            "check_interval_minutes": 18,
+            "allow_latest_push": True,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["mirror"]["mode"] == "auto_push"
+    assert updated.json()["mirror"]["check_interval_minutes"] == 18
+    assert updated.json()["mirror"]["allow_latest_push"] is True
+
+    check = client.post("/api/mirrors/0/check").json()["queue"]
+    assert check["task_type"] == "check"
+    assert check["mirror_source"] == source
+    assert check["mirror_target"] == expected_target
+
+    push = client.post("/api/mirrors/0/push", json={"digest": "sha256:manual"}).json()["queue"]
+    assert push["task_type"] == "push"
+    assert push["digest"] == "sha256:manual"
+
+    push_queue = client.get("/api/sync-queue", params={"type": "push"}).json()
+    assert len(push_queue) == 1
+    assert push_queue[0]["mirror_source"] == source
+    assert push_queue[0]["digest"] == "sha256:manual"
+
+    assert client.post("/api/mirrors/0/pause").json()["mirror"]["enabled"] is False
+    assert client.post("/api/mirrors/0/resume").json()["mirror"]["enabled"] is True
+    skipped = client.post("/api/mirrors/0/skip-pending-push").json()["mirror"]
+    assert skipped["pending_push_digest"] == ""
+    assert skipped["push_status"] == "skipped"
+
+    events = client.get("/api/mirror-events", params={"mirror_id": source}).json()
+    assert events[0]["type"] == "push"
+    assert events[0]["status"] == "skipped"
+    assert events[0]["new_digest"] == "sha256:manual"
+    assert "mode: auto_push" in config_path.read_text(encoding="utf-8")
 
 
 def test_missing_config_file_bootstraps_default_config(tmp_path, monkeypatch):
@@ -777,11 +846,16 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert "sync_queue" in tables
         assert "api_tokens" not in tables
         versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert versions == ["0001_initial", "0002_drop_api_tokens"]
+        assert versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1"]
+        mirror_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mirrors)")}
+        queue_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_queue)")}
+        assert {"mode", "next_check_at", "pending_push_digest", "allow_latest_push"} <= mirror_columns
+        assert {"task_type", "mirror_source", "mirror_target", "digest", "lease_expires_at"} <= queue_columns
+        assert "mirror_events" in tables
 
         panel_db.init_db(conn)
         repeat_versions = [row["version"] for row in conn.execute("SELECT version FROM schema_migrations")]
-        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens"]
+        assert repeat_versions == ["0001_initial", "0002_drop_api_tokens", "0003_mirror_monitoring_phase1"]
 
     old_db_path = tmp_path / "old.db"
     with sqlite3.connect(old_db_path) as conn:
@@ -802,8 +876,8 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
             """
         )
         conn.execute(
-            "INSERT INTO mirrors(source, target, updated_at) VALUES (?, ?, ?)",
-            ("docker.io/library/busybox:latest", "localhost:5000/library/busybox:latest", "2024-01-01T00:00:00+00:00"),
+            "INSERT INTO mirrors(source, target, last_digest, updated_at) VALUES (?, ?, ?, ?)",
+            ("docker.io/library/busybox:latest", "localhost:5000/library/busybox:latest", "sha256:old", "2024-01-01T00:00:00+00:00"),
         )
         conn.commit()
 
@@ -811,8 +885,13 @@ def test_schema_migrations_empty_old_repeat_and_failure(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM mirrors").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0001_initial'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0002_drop_api_tokens'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = '0003_mirror_monitoring_phase1'").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'api_tokens'").fetchone()[0] == 0
+        migrated = conn.execute("SELECT mode, next_check_at, last_source_digest FROM mirrors WHERE source = ?", ("docker.io/library/busybox:latest",)).fetchone()
+        assert migrated["mode"] == "auto_push"
+        assert migrated["next_check_at"]
+        assert migrated["last_source_digest"] == "sha256:old"
 
     failing_db_path = tmp_path / "failing.db"
     with sqlite3.connect(failing_db_path) as conn:

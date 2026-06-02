@@ -3,7 +3,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -86,6 +86,13 @@ def public_sync_queue_task(row: dict) -> dict:
         "id": row["id"],
         "reason": row["reason"],
         "sources": parse_queue_sources(row.get("sources")),
+        "task_type": row.get("task_type") or "sync",
+        "mirror_source": row.get("mirror_source") or "",
+        "mirror_target": row.get("mirror_target") or "",
+        "digest": row.get("digest") or "",
+        "claimed_by": row.get("claimed_by") or "",
+        "claimed_at": row.get("claimed_at") or "",
+        "lease_expires_at": row.get("lease_expires_at") or "",
         "priority": int(row.get("priority") or 100),
         "status": row["status"],
         "dedupe_key": row.get("dedupe_key") or "",
@@ -104,7 +111,8 @@ def sync_queue_row(queue_id: int) -> dict:
     row = db_one(
         """
         SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
-               message, created_at, updated_at, started_at, finished_at
+               message, created_at, updated_at, started_at, finished_at,
+               task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
         FROM sync_queue
         WHERE id = ?
         """,
@@ -115,14 +123,31 @@ def sync_queue_row(queue_id: int) -> dict:
     return row
 
 
-def list_sync_queue(limit: int = 50, status: str = "") -> list[dict]:
+def list_sync_queue(limit: int = 50, status: str = "", task_type: str = "") -> list[dict]:
     bounded_limit = max(1, min(limit, 200))
     clean_status = status.strip().lower()
-    if clean_status:
+    clean_task_type = task_type.strip().lower()
+    if clean_task_type and clean_task_type not in {"sync", "check", "push"}:
+        raise HTTPException(400, "type 必须是 sync、check 或 push")
+    if clean_status and clean_task_type:
         rows = db_rows(
             """
             SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
-                   message, created_at, updated_at, started_at, finished_at
+                   message, created_at, updated_at, started_at, finished_at,
+                   task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
+            FROM sync_queue
+            WHERE status = ? AND task_type = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (clean_status, clean_task_type, bounded_limit),
+        )
+    elif clean_status:
+        rows = db_rows(
+            """
+            SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
+                   message, created_at, updated_at, started_at, finished_at,
+                   task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
             FROM sync_queue
             WHERE status = ?
             ORDER BY id DESC
@@ -130,11 +155,25 @@ def list_sync_queue(limit: int = 50, status: str = "") -> list[dict]:
             """,
             (clean_status, bounded_limit),
         )
+    elif clean_task_type:
+        rows = db_rows(
+            """
+            SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
+                   message, created_at, updated_at, started_at, finished_at,
+                   task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
+            FROM sync_queue
+            WHERE task_type = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (clean_task_type, bounded_limit),
+        )
     else:
         rows = db_rows(
             """
             SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
-                   message, created_at, updated_at, started_at, finished_at
+                   message, created_at, updated_at, started_at, finished_at,
+                   task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
             FROM sync_queue
             ORDER BY id DESC
             LIMIT ?
@@ -158,15 +197,23 @@ def enqueue_sync_task(
     scheduled_at: str | None = None,
     actor: str = "panel",
     force: bool = False,
+    task_type: str = "sync",
+    mirror_source: str = "",
+    mirror_target: str = "",
+    digest: str = "",
 ) -> dict:
     clean_reason = reason.strip() or "manual"
     clean_sources = clean_queue_sources(source=source, sources=sources)
-    dedupe_key = queue_dedupe_key(clean_reason, clean_sources)
+    clean_task_type = task_type.strip().lower() if task_type else "sync"
+    if clean_task_type not in {"sync", "check", "push"}:
+        clean_task_type = "sync"
+    dedupe_key = queue_dedupe_key(f"{clean_task_type}:{clean_reason}:{digest}", clean_sources)
     if not force:
         existing = db_one(
             """
             SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
-                   message, created_at, updated_at, started_at, finished_at
+                   message, created_at, updated_at, started_at, finished_at,
+                   task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
             FROM sync_queue
             WHERE dedupe_key = ? AND status IN ('queued', 'running', 'paused', 'cancel_requested')
             ORDER BY id DESC
@@ -183,8 +230,8 @@ def enqueue_sync_task(
     run_after = scheduled_at or now
     queue_id = db_execute(
         """
-        INSERT INTO sync_queue(reason, sources, priority, status, dedupe_key, scheduled_at, attempts, created_at, updated_at, message)
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        INSERT INTO sync_queue(reason, sources, priority, status, dedupe_key, scheduled_at, attempts, created_at, updated_at, message, task_type, mirror_source, mirror_target, digest)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             clean_reason,
@@ -196,6 +243,10 @@ def enqueue_sync_task(
             now,
             now,
             "queued",
+            clean_task_type,
+            mirror_source or (clean_sources[0] if clean_sources else ""),
+            mirror_target or "",
+            digest or "",
         ),
     )
     audit_log("enqueue", "sync_queue", str(queue_id), {"reason": clean_reason, "sources": clean_sources, "priority": priority}, actor=actor)
@@ -340,7 +391,8 @@ def next_worker_queue_task() -> dict | None:
     return db_one(
         """
         SELECT id, reason, sources, priority, status, dedupe_key, scheduled_at, attempts, run_id,
-               message, created_at, updated_at, started_at, finished_at
+               message, created_at, updated_at, started_at, finished_at,
+               task_type, mirror_source, mirror_target, digest, claimed_by, claimed_at, lease_expires_at
         FROM sync_queue
         WHERE status = 'queued' AND scheduled_at <= ?
         ORDER BY priority ASC, id ASC
@@ -357,13 +409,15 @@ def claim_worker_queue_task(body: WorkerClaimIn) -> dict:
     if not row:
         return {"ok": True, "worker": worker, "task": None, "claim": None}
     now = now_iso()
+    lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).replace(microsecond=0).isoformat()
     db_execute(
         """
         UPDATE sync_queue
-        SET status = 'running', message = ?, updated_at = ?, started_at = COALESCE(started_at, ?), attempts = attempts + 1
+        SET status = 'running', message = ?, updated_at = ?, started_at = COALESCE(started_at, ?),
+            attempts = attempts + 1, claimed_by = ?, claimed_at = ?, lease_expires_at = ?
         WHERE id = ? AND status = 'queued'
         """,
-        (f"claimed by worker {worker['worker_id']}", now, now, row["id"]),
+        (f"claimed by worker {worker['worker_id']}", now, now, worker["worker_id"], now, lease_expires_at, row["id"]),
     )
     claim_id = db_execute(
         """
@@ -418,8 +472,8 @@ def trigger_sync():
 
 
 @router.get("/sync-queue")
-def get_sync_queue(limit: int = 50, status: str = ""):
-    return list_sync_queue(limit=limit, status=status)
+def get_sync_queue(limit: int = 50, status: str = "", type: str = ""):
+    return list_sync_queue(limit=limit, status=status, task_type=type)
 
 
 @router.post("/sync-queue/{queue_id}/pause", dependencies=[Depends(require_write_token)])

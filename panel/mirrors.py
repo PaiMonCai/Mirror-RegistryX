@@ -11,4 +11,4 @@ build_discovery_preview = legacy.build_discovery_preview
 build_mirror_preflight = legacy.build_mirror_preflight
 build_local_artifact_archive = legacy.build_local_artifact_archive
 
-router = legacy_router("mirrors", lambda path: path_in_prefixes(path, ["/api/mirrors"]))
+router = legacy_router("mirrors", lambda path: path_in_prefixes(path, ["/api/mirrors", "/api/mirror-events"]))

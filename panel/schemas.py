@@ -23,12 +23,18 @@ class PasswordResetIn(BaseModel):
 
 class MirrorIn(BaseModel):
     source: str = Field(min_length=1, max_length=255)
-    target: str = Field(min_length=1, max_length=255)
+    target: str | None = Field(default=None, max_length=255)
+    target_registry: str | None = Field(default=None, max_length=255)
+    target_namespace: str | None = Field(default=None, max_length=128)
+    target_override: str | None = Field(default=None, max_length=255)
     registry: str = Field(default="local", min_length=1, max_length=64)
     group: str = Field(default="default", min_length=1, max_length=64)
     project: str = Field(default="default", min_length=1, max_length=64)
     environment: str = Field(default="local", min_length=1, max_length=64)
     namespace: str = Field(default="library", min_length=1, max_length=128)
+    mode: str = Field(default="auto_push", max_length=32)
+    check_interval_minutes: int = Field(default=30, ge=1, le=1440)
+    allow_latest_push: bool = False
     source_credential_id: str | None = Field(default=None, max_length=64)
     target_credential_id: str | None = Field(default=None, max_length=64)
 
@@ -62,6 +68,10 @@ class MirrorPreflightIn(MirrorIn):
 class MirrorPreflightBatchIn(BaseModel):
     mirrors: list[MirrorIn] = Field(default_factory=list, max_length=500)
     check_remote: bool = False
+
+
+class MirrorPushIn(BaseModel):
+    digest: str | None = Field(default=None, max_length=255)
 
 
 class RegistryIn(BaseModel):

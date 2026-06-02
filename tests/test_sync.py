@@ -56,6 +56,9 @@ def test_valid_mirrors_skips_bad_entries(tmp_path, monkeypatch):
             "project": "default",
             "environment": "local",
             "namespace": "library",
+            "mode": "auto_push",
+            "check_interval_minutes": 30,
+            "allow_latest_push": False,
             "source_credential_id": "",
             "target_credential_id": "",
         }
@@ -377,6 +380,294 @@ def test_sync_queue_consumes_task_and_recovers_running(tmp_path, monkeypatch):
     stale = sync_main.sync_queue_row(stale_id)
     assert stale["status"] == "queued"
     assert stale["message"] == "recovered after worker restart"
+
+
+def test_due_mirror_rules_enqueue_typed_check_tasks(tmp_path, monkeypatch):
+    config_path = tmp_path / "config" / "mirrors.yml"
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        """
+mirrors:
+  - source: docker.io/library/busybox:latest
+    target: localhost:5000/library/busybox:latest
+    check_interval_minutes: 5
+settings:
+  check_interval_minutes: 30
+""",
+        encoding="utf-8",
+    )
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+
+    assert sync_main.enqueue_due_mirror_checks() == 1
+    assert sync_main.enqueue_due_mirror_checks() == 0
+
+    with sync_main.connect_db() as conn:
+        row = conn.execute(
+            "SELECT task_type, reason, mirror_source, mirror_target, status FROM sync_queue"
+        ).fetchone()
+
+    assert row["task_type"] == "check"
+    assert row["reason"] == "mirror-check"
+    assert row["mirror_source"] == "docker.io/library/busybox:latest"
+    assert row["mirror_target"] == "localhost:5000/library/busybox:latest"
+    assert row["status"] == "queued"
+
+
+def test_mirror_check_skips_unchanged_digest(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:stable",
+                    "mode": "auto_push",
+                    "check_interval_minutes": 7,
+                }
+            ]
+        }
+    )
+    sync_main.db_write(
+        "UPDATE mirrors SET last_digest = ?, last_source_digest = ?, next_check_at = ? WHERE source = ?",
+        ("sha256:same", "sha256:same", "2024-01-01T00:00:00+00:00", "docker.io/library/busybox:latest"),
+    )
+    task = sync_main.enqueue_rule_queue_task("check", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), force=True)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:same", ""))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    queue = sync_main.sync_queue_row(task["id"])
+    events = sync_main.db_rows("SELECT type, status, old_digest, new_digest FROM mirror_events")
+    assert queue["status"] == "completed"
+    assert rule["last_checked_at"]
+    assert rule["next_check_at"]
+    assert rule["last_source_digest"] == "sha256:same"
+    assert rule["push_status"] == "idle"
+    assert events == [{"type": "check", "status": "skipped", "old_digest": "sha256:same", "new_digest": "sha256:same"}]
+
+
+def test_mirror_check_auto_push_enqueues_push_on_digest_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:stable",
+                    "mode": "auto_push",
+                }
+            ]
+        }
+    )
+    sync_main.db_write(
+        "UPDATE mirrors SET last_source_digest = ?, next_check_at = ? WHERE source = ?",
+        ("sha256:old", "2024-01-01T00:00:00+00:00", "docker.io/library/busybox:latest"),
+    )
+    sync_main.enqueue_rule_queue_task("check", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), force=True)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:new", ""))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    push = sync_main.db_one("SELECT task_type, status, digest FROM sync_queue WHERE task_type = 'push'")
+    event = sync_main.db_one("SELECT type, status, old_digest, new_digest FROM mirror_events WHERE type = 'change_detected'")
+    assert rule["last_source_digest"] == "sha256:new"
+    assert rule["pending_push_digest"] == "sha256:new"
+    assert rule["push_status"] == "pending"
+    assert push == {"task_type": "push", "status": "queued", "digest": "sha256:new"}
+    assert event == {"type": "change_detected", "status": "succeeded", "old_digest": "sha256:old", "new_digest": "sha256:new"}
+
+
+def test_mirror_check_monitor_only_records_change_without_push(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    notifications = []
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:stable",
+                    "mode": "monitor_only",
+                }
+            ]
+        }
+    )
+    sync_main.enqueue_rule_queue_task("check", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), force=True)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:monitor", ""))
+    monkeypatch.setattr(sync_main, "notify_webhook", lambda event, payload, webhook_url="": notifications.append((event, payload, webhook_url)))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    push_count = sync_main.db_one("SELECT COUNT(*) AS count FROM sync_queue WHERE task_type = 'push'")["count"]
+    assert rule["pending_push_digest"] == "sha256:monitor"
+    assert rule["push_status"] == "skipped"
+    assert push_count == 0
+    assert notifications[0][0] == "change_detected"
+    assert notifications[0][1]["mode"] == "monitor_only"
+
+
+def test_mirror_latest_push_blocked_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    notifications = []
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:latest",
+                    "mode": "auto_push",
+                }
+            ]
+        }
+    )
+    sync_main.enqueue_rule_queue_task("check", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), force=True)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:new-latest", ""))
+    monkeypatch.setattr(sync_main, "notify_webhook", lambda event, payload, webhook_url="": notifications.append((event, payload, webhook_url)))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    push_count = sync_main.db_one("SELECT COUNT(*) AS count FROM sync_queue WHERE task_type = 'push'")["count"]
+    assert rule["pending_push_digest"] == "sha256:new-latest"
+    assert rule["push_status"] == "skipped"
+    assert rule["last_error"] == "latest push blocked"
+    assert push_count == 0
+    assert notifications[0][1]["message"] == "latest push blocked"
+
+
+def test_mirror_push_success_updates_rule_and_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("STATE_PATH", str(tmp_path / "data" / "sync-state.json"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:stable",
+                    "mode": "auto_push",
+                }
+            ]
+        }
+    )
+    sync_main.db_write(
+        """
+        UPDATE mirrors
+        SET pending_push_digest = ?, pending_push_target = ?, push_status = 'pending', last_source_digest = ?
+        WHERE source = ?
+        """,
+        ("sha256:new", "localhost:5000/library/busybox:stable", "sha256:new", "docker.io/library/busybox:latest"),
+    )
+    task = sync_main.enqueue_rule_queue_task("push", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), digest="sha256:new", force=True)
+    inspected = []
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "copy_image", lambda source, target, retry_count=0, authfile="": (True, "localhost:5000/library/busybox:stable", ""))
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": inspected.append(image) or ("sha256:target", ""))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    state = json.loads((tmp_path / "data" / "sync-state.json").read_text(encoding="utf-8"))
+    queue = sync_main.sync_queue_row(task["id"])
+    event = sync_main.db_one("SELECT type, status, new_digest FROM mirror_events WHERE type = 'push_succeeded'")
+    assert queue["status"] == "completed"
+    assert inspected == ["localhost:5000/library/busybox:stable"]
+    assert rule["last_digest"] == "sha256:new"
+    assert rule["last_source_digest"] == "sha256:new"
+    assert rule["last_target_digest"] == "sha256:target"
+    assert rule["pending_push_digest"] is None
+    assert rule["push_status"] == "succeeded"
+    assert state["docker.io/library/busybox:latest"] == "sha256:new"
+    assert event == {"type": "push_succeeded", "status": "succeeded", "new_digest": "sha256:new"}
+
+
+def test_mirror_push_failure_preserves_pending_digest_and_retries(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    notifications = []
+    sync_main.valid_mirrors(
+        {
+            "mirrors": [
+                {
+                    "source": "docker.io/library/busybox:latest",
+                    "target": "localhost:5000/library/busybox:stable",
+                    "mode": "auto_push",
+                }
+            ]
+        }
+    )
+    sync_main.db_write(
+        """
+        UPDATE mirrors
+        SET pending_push_digest = ?, pending_push_target = ?, push_status = 'pending', last_source_digest = ?
+        WHERE source = ?
+        """,
+        ("sha256:retry", "localhost:5000/library/busybox:stable", "sha256:retry", "docker.io/library/busybox:latest"),
+    )
+    task = sync_main.enqueue_rule_queue_task("push", sync_main.mirror_rule_by_source("docker.io/library/busybox:latest"), digest="sha256:retry", force=True)
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "copy_image", lambda source, target, retry_count=0, authfile="": (False, "localhost:5000/library/busybox:stable", "copy failed"))
+    monkeypatch.setattr(sync_main, "notify_webhook", lambda event, payload, webhook_url="": notifications.append((event, payload, webhook_url)))
+
+    assert sync_main.process_sync_queue() == 1
+
+    rule = sync_main.mirror_rule_by_source("docker.io/library/busybox:latest")
+    queue = sync_main.sync_queue_row(task["id"])
+    retry = sync_main.db_one(
+        "SELECT task_type, status, digest, scheduled_at FROM sync_queue WHERE task_type = 'push' AND id != ?",
+        (task["id"],),
+    )
+    event = sync_main.db_one("SELECT type, status, new_digest, message FROM mirror_events WHERE type = 'push_failed'")
+    assert queue["status"] == "failed"
+    assert rule["pending_push_digest"] == "sha256:retry"
+    assert rule["push_status"] == "failed"
+    assert rule["push_failures"] == 1
+    assert rule["next_push_at"]
+    assert retry["status"] == "queued"
+    assert retry["digest"] == "sha256:retry"
+    assert retry["scheduled_at"] == rule["next_push_at"]
+    assert event == {"type": "push_failed", "status": "failed", "new_digest": "sha256:retry", "message": "copy failed"}
+    assert notifications[0][0] == "push_failed"
 
 
 def test_copy_image_uses_exponential_retry_and_target_lock(tmp_path, monkeypatch):

@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from mirror_registry_core.config import default_config
+from mirror_registry_core.mirror_rules import add_minutes, bool_int, bounded_interval, normalize_mode, normalize_push_status
 from .schemas import (
     BackupRestoreDrillIn,
     BackupRestoreVerifyIn,
@@ -37,6 +38,7 @@ from .schemas import (
     MirrorIn,
     MirrorPreflightBatchIn,
     MirrorPreflightIn,
+    MirrorPushIn,
     RegistryIn,
     RetentionPolicyIn,
     ScheduledPushPolicyIn,
@@ -61,7 +63,7 @@ from .auth import (
     require_write_token,
     router as auth_router,
 )
-from .queue import router as queue_router, write_trigger
+from .queue import enqueue_sync_task, router as queue_router, write_trigger
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -269,6 +271,15 @@ def normalize_target_registry(value: str) -> str:
 
 def discovery_target_for_source(source: str, target_registry: str) -> str:
     _, repo, tag = split_image_ref(source)
+    return validate_image_ref(f"{normalize_target_registry(target_registry)}/{repo}:{tag}", "target")
+
+
+def generated_target_for_source(source: str, target_registry: str, namespace: str = "") -> str:
+    _, repo, tag = split_image_ref(source)
+    clean_namespace = str(namespace or "").strip().strip("/")
+    if clean_namespace:
+        repo_name = repo.rsplit("/", 1)[-1]
+        repo = f"{clean_namespace}/{repo_name}"
     return validate_image_ref(f"{normalize_target_registry(target_registry)}/{repo}:{tag}", "target")
 
 
@@ -872,11 +883,16 @@ def group_map(config: dict | None = None) -> dict[str, dict]:
 
 def normalize_mirror(item: dict, groups: dict[str, dict] | None = None) -> dict:
     source = validate_image_ref(str(item.get("source", "")), "source")
-    target = validate_image_ref(str(item.get("target", "")), "target")
+    target_value = str(item.get("target_override") or item.get("target") or "").strip()
+    if not target_value:
+        target_registry = str(item.get("target_registry") or "localhost:5000")
+        target_value = generated_target_for_source(source, target_registry, str(item.get("target_namespace") or item.get("namespace") or ""))
+    target = validate_image_ref(target_value, "target")
     group_id = validate_slug(str(item.get("group") or item.get("group_id") or "default"), "group")
     groups = groups or group_map()
     group = groups.get(group_id, groups["default"])
     registry = validate_slug(str(item.get("registry") or item.get("registry_id") or group.get("registry") or "local"), "registry")
+    mode = normalize_mode(item.get("mode"))
     return {
         "source": source,
         "target": target,
@@ -885,6 +901,9 @@ def normalize_mirror(item: dict, groups: dict[str, dict] | None = None) -> dict:
         "project": validate_slug(str(item.get("project") or group.get("project") or "default"), "project"),
         "environment": validate_slug(str(item.get("environment") or group.get("environment") or "local"), "environment"),
         "namespace": str(item.get("namespace") or group.get("namespace") or "library").strip() or "library",
+        "mode": mode,
+        "check_interval_minutes": bounded_interval(item.get("check_interval_minutes"), settings_with_defaults()["check_interval_minutes"] if "settings_with_defaults" in globals() else 30),
+        "allow_latest_push": bool(bool_int(item.get("allow_latest_push"))),
         "source_credential_id": optional_slug(item.get("source_credential_id"), "source_credential_id"),
         "target_credential_id": optional_slug(item.get("target_credential_id"), "target_credential_id"),
     }
@@ -911,6 +930,9 @@ def valid_mirrors(config: dict) -> list[dict]:
                         "project": "default",
                         "environment": "local",
                         "namespace": "library",
+                        "mode": "auto_push",
+                        "check_interval_minutes": settings_with_defaults()["check_interval_minutes"],
+                        "allow_latest_push": False,
                         "source_credential_id": "",
                         "target_credential_id": "",
                     }
@@ -942,22 +964,213 @@ def mask_url(value: str) -> str:
     return f"{value[:12]}...{value[-6:]}"
 
 
-def upsert_mirror_db(source: str, target: str, digest: str | None = None) -> None:
+def upsert_mirror_db(source: str, target: str, digest: str | None = None, mirror: dict | None = None) -> None:
+    mirror = mirror or {}
+    interval = bounded_interval(mirror.get("check_interval_minutes"), settings_with_defaults()["check_interval_minutes"])
+    mode = normalize_mode(mirror.get("mode"))
+    next_check = add_minutes(now_iso(), 0)
     db_execute(
         """
-        INSERT INTO mirrors(source, target, enabled, last_digest, updated_at)
-        VALUES (?, ?, 1, ?, ?)
+        INSERT INTO mirrors(
+            source, target, enabled, last_digest, registry, mirror_group, project, environment, namespace,
+            mode, check_interval_minutes, next_check_at, last_source_digest, push_status,
+            allow_latest_push, source_credential_id, target_credential_id, updated_at
+        )
+        VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)
         ON CONFLICT(source) DO UPDATE SET
             target = excluded.target,
             last_digest = COALESCE(excluded.last_digest, mirrors.last_digest),
+            registry = excluded.registry,
+            mirror_group = excluded.mirror_group,
+            project = excluded.project,
+            environment = excluded.environment,
+            namespace = excluded.namespace,
+            mode = excluded.mode,
+            check_interval_minutes = excluded.check_interval_minutes,
+            next_check_at = COALESCE(mirrors.next_check_at, excluded.next_check_at),
+            last_source_digest = COALESCE(excluded.last_source_digest, mirrors.last_source_digest, mirrors.last_digest),
+            allow_latest_push = excluded.allow_latest_push,
+            source_credential_id = excluded.source_credential_id,
+            target_credential_id = excluded.target_credential_id,
             updated_at = excluded.updated_at
         """,
-        (source, target, digest, now_iso()),
+        (
+            source,
+            target,
+            digest,
+            mirror.get("registry") or "local",
+            mirror.get("group") or mirror.get("mirror_group") or "default",
+            mirror.get("project") or "default",
+            mirror.get("environment") or "local",
+            mirror.get("namespace") or "library",
+            mode,
+            interval,
+            next_check,
+            digest,
+            bool_int(mirror.get("allow_latest_push")),
+            mirror.get("source_credential_id") or "",
+            mirror.get("target_credential_id") or "",
+            now_iso(),
+        ),
     )
 
 
 def delete_mirror_db(source: str) -> None:
     db_execute("DELETE FROM mirrors WHERE source = ?", (source,))
+
+
+def mirror_rule_rows(enabled: bool | None = None) -> list[dict]:
+    where = ""
+    params: tuple = ()
+    if enabled is not None:
+        where = "WHERE enabled = ?"
+        params = (1 if enabled else 0,)
+    return db_rows(
+        f"""
+        SELECT source, target, enabled, last_digest, registry, mirror_group, project, environment, namespace,
+               mode, check_interval_minutes, next_check_at, last_checked_at, last_source_digest,
+               last_target_digest, last_change_at, last_push_at, pending_push_digest, pending_push_target,
+               push_status, check_failures, push_failures, next_push_at, last_error, allow_latest_push,
+               source_credential_id, target_credential_id, updated_at
+        FROM mirrors
+        {where}
+        ORDER BY source
+        """,
+        params,
+    )
+
+
+def mirror_rule_by_index(index: int) -> dict:
+    rows = mirror_rule_rows()
+    if index < 0 or index >= len(rows):
+        raise HTTPException(404, "镜像不存在")
+    return rows[index]
+
+
+def mirror_rule_by_source(source: str) -> dict | None:
+    return db_one(
+        """
+        SELECT source, target, enabled, last_digest, registry, mirror_group, project, environment, namespace,
+               mode, check_interval_minutes, next_check_at, last_checked_at, last_source_digest,
+               last_target_digest, last_change_at, last_push_at, pending_push_digest, pending_push_target,
+               push_status, check_failures, push_failures, next_push_at, last_error, allow_latest_push,
+               source_credential_id, target_credential_id, updated_at
+        FROM mirrors
+        WHERE source = ?
+        """,
+        (source,),
+    )
+
+
+def short_digest(value: str | None) -> str:
+    digest = value or ""
+    return (digest[7:19] + "...") if len(digest) > 19 and digest.startswith("sha256:") else digest
+
+
+def public_mirror_rule(row: dict, index: int = 0) -> dict:
+    digest = row.get("last_source_digest") or row.get("last_digest") or ""
+    last_item = db_one(
+        """
+        SELECT status, step, error, ended_at
+        FROM sync_run_items
+        WHERE source = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["source"],),
+    )
+    last_error = row.get("last_error") or (last_item.get("error") if last_item else "") or ""
+    return {
+        "index": index,
+        "id": row["source"],
+        "source": row["source"],
+        "target": row["target"],
+        "enabled": bool(row.get("enabled")),
+        "registry": row.get("registry") or "local",
+        "group": row.get("mirror_group") or "default",
+        "project": row.get("project") or "default",
+        "environment": row.get("environment") or "local",
+        "namespace": row.get("namespace") or "library",
+        "mode": normalize_mode(row.get("mode")),
+        "check_interval_minutes": int(row.get("check_interval_minutes") or 30),
+        "next_check_at": row.get("next_check_at") or "",
+        "last_checked_at": row.get("last_checked_at") or "",
+        "last_source_digest": row.get("last_source_digest") or "",
+        "last_target_digest": row.get("last_target_digest") or "",
+        "last_change_at": row.get("last_change_at") or "",
+        "last_push_at": row.get("last_push_at") or "",
+        "pending_push_digest": row.get("pending_push_digest") or "",
+        "pending_push_target": row.get("pending_push_target") or "",
+        "push_status": normalize_push_status(row.get("push_status")),
+        "check_failures": int(row.get("check_failures") or 0),
+        "push_failures": int(row.get("push_failures") or 0),
+        "next_push_at": row.get("next_push_at") or "",
+        "last_error": last_error,
+        "allow_latest_push": bool(row.get("allow_latest_push")),
+        "source_credential_id": row.get("source_credential_id") or "",
+        "target_credential_id": row.get("target_credential_id") or "",
+        "digest": short_digest(digest),
+        "synced": bool(digest),
+        "last_status": last_item.get("status") if last_item else "",
+        "last_step": last_item.get("step") if last_item else "",
+        "last_finished_at": last_item.get("ended_at") if last_item else "",
+        "updated_at": row.get("updated_at") or "",
+    }
+
+
+def mirror_rule_export(row: dict) -> dict:
+    public = public_mirror_rule(row)
+    return {
+        "source": public["source"],
+        "target": public["target"],
+        "registry": public["registry"],
+        "group": public["group"],
+        "project": public["project"],
+        "environment": public["environment"],
+        "namespace": public["namespace"],
+        "mode": public["mode"],
+        "check_interval_minutes": public["check_interval_minutes"],
+        "allow_latest_push": public["allow_latest_push"],
+        "source_credential_id": public["source_credential_id"],
+        "target_credential_id": public["target_credential_id"],
+    }
+
+
+def seed_mirror_rules_from_config() -> None:
+    config = load_config()
+    for mirror in valid_mirrors(config):
+        upsert_mirror_db(mirror["source"], mirror["target"], mirror=mirror)
+
+
+def sync_config_from_db() -> None:
+    config = load_config()
+    config["mirrors"] = [mirror_rule_export(row) for row in mirror_rule_rows()]
+    save_config(config)
+
+
+def enqueue_rule_task(task_type: str, row: dict, digest: str = "", force: bool = False) -> dict:
+    reason = f"mirror-{task_type}"
+    return enqueue_sync_task(
+        reason,
+        source=row["source"],
+        priority=40 if task_type == "push" else 60,
+        actor="panel",
+        force=force,
+        task_type=task_type,
+        mirror_source=row["source"],
+        mirror_target=row["target"],
+        digest=digest,
+    )
+
+
+def record_mirror_event(mirror_id: str, event_type: str, status: str, old_digest: str = "", new_digest: str = "", message: str = "", detail: dict | None = None) -> None:
+    db_execute(
+        """
+        INSERT INTO mirror_events(mirror_id, type, status, old_digest, new_digest, message, detail_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (mirror_id, event_type, status, old_digest, new_digest, message, json.dumps(detail or {}, ensure_ascii=False), now_iso()),
+    )
 
 
 def validate_discovery_mode(value: str) -> str:
@@ -2361,8 +2574,9 @@ def get_status():
     config = load_config()
     settings = settings_with_defaults()
     state = load_state()
-    mirrors = valid_mirrors(config)
-    synced = sum(1 for mirror in mirrors if state.get(mirror["source"]))
+    seed_mirror_rules_from_config()
+    mirrors = mirror_rule_rows()
+    synced = sum(1 for mirror in mirrors if mirror.get("last_source_digest") or mirror.get("last_digest") or state.get(mirror["source"]))
     runtime = runtime_state()
     running = runtime.get("sync_running", {}).get("value") == "true"
     return {
@@ -2445,50 +2659,13 @@ def get_observability_metrics():
 
 @app.get("/api/mirrors")
 def list_mirrors():
-    config = load_config()
-    state = load_state()
-    result = []
-    for index, mirror in enumerate(valid_mirrors(config)):
-        digest = state.get(mirror["source"], "")
-        db_mirror = db_one("SELECT last_digest FROM mirrors WHERE source = ?", (mirror["source"],))
-        if not digest and db_mirror:
-            digest = db_mirror.get("last_digest") or ""
-        last_item = db_one(
-            """
-            SELECT status, step, error, ended_at
-            FROM sync_run_items
-            WHERE source = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (mirror["source"],),
-        )
-        short = (digest[7:19] + "...") if len(digest) > 19 and digest.startswith("sha256:") else digest
-        result.append(
-            {
-                "index": index,
-                "source": mirror["source"],
-                "target": mirror["target"],
-                "registry": mirror["registry"],
-                "group": mirror["group"],
-                "project": mirror["project"],
-                "environment": mirror["environment"],
-                "namespace": mirror["namespace"],
-                "source_credential_id": mirror["source_credential_id"],
-                "target_credential_id": mirror["target_credential_id"],
-                "digest": short,
-                "synced": bool(digest),
-                "last_status": last_item.get("status") if last_item else "",
-                "last_error": last_item.get("error") if last_item else "",
-                "last_step": last_item.get("step") if last_item else "",
-                "last_finished_at": last_item.get("ended_at") if last_item else "",
-            }
-        )
-    return result
+    seed_mirror_rules_from_config()
+    return [public_mirror_rule(row, index) for index, row in enumerate(mirror_rule_rows())]
 
 
 @app.get("/api/mirrors/export")
 def export_mirrors():
+    seed_mirror_rules_from_config()
     config = load_config()
     settings = settings_with_defaults()
     safe_settings = {
@@ -2502,7 +2679,7 @@ def export_mirrors():
         "exported_at": now_iso(),
         "registries": list(registry_map(config).values()),
         "mirror_groups": list(group_map(config).values()),
-        "mirrors": valid_mirrors(config),
+        "mirrors": [mirror_rule_export(row) for row in mirror_rule_rows()],
         "settings": safe_settings,
     }
 
@@ -2515,7 +2692,6 @@ def import_mirrors(body: MirrorImportIn):
         source = validate_image_ref(item.source, "source")
         if source in seen_sources:
             continue
-        target = validate_image_ref(item.target, "target")
         seen_sources.add(source)
         imported.append(normalize_mirror(item.model_dump()))
     if not imported:
@@ -2546,7 +2722,7 @@ def import_mirrors(body: MirrorImportIn):
     config["mirrors"] = mirrors
     save_config(config)
     for mirror in imported:
-        upsert_mirror_db(mirror["source"], mirror["target"])
+        upsert_mirror_db(mirror["source"], mirror["target"], mirror=mirror)
     audit_log("import", "mirrors", "bulk", {"imported": len(imported), "replace": body.replace})
     return {"ok": True, "imported": len(imported), "total": len(mirrors), "replace": body.replace}
 
@@ -2581,7 +2757,7 @@ def import_discovered_mirrors(body: MirrorDiscoveryIn):
     config["mirrors"] = mirrors
     save_config(config)
     for mirror in imported:
-        upsert_mirror_db(mirror["source"], mirror["target"])
+        upsert_mirror_db(mirror["source"], mirror["target"], mirror=mirror)
     queue_task = None
     if body.trigger_sync:
         queue_task = write_trigger("discover-import", sources=[mirror["source"] for mirror in imported])
@@ -2623,7 +2799,8 @@ async def preflight_mirror(body: MirrorPreflightIn):
 @app.post("/api/mirrors/preflight/batch", dependencies=[Depends(require_write_token)])
 async def preflight_mirrors_batch(body: MirrorPreflightBatchIn):
     requested = [item.model_dump() for item in body.mirrors]
-    mirrors = requested if requested else valid_mirrors(load_config())
+    seed_mirror_rules_from_config()
+    mirrors = requested if requested else [mirror_rule_export(row) for row in mirror_rule_rows()]
     mirrors = mirrors[:500]
     items = []
     for mirror in mirrors:
@@ -2638,68 +2815,173 @@ def add_mirror(body: MirrorIn):
     mirror = normalize_mirror(body.model_dump())
     source = mirror["source"]
     target = mirror["target"]
+    seed_mirror_rules_from_config()
+    if mirror_rule_by_source(source):
+        raise HTTPException(400, "该 source 已存在")
     config = load_config()
     mirrors = valid_mirrors(config)
-    if any(mirror["source"] == source for mirror in mirrors):
-        raise HTTPException(400, "该 source 已存在")
     mirrors.append(mirror)
     config["mirrors"] = mirrors
     save_config(config)
-    upsert_mirror_db(source, target)
+    upsert_mirror_db(source, target, mirror=mirror)
     audit_log("create", "mirror", source, mirror)
-    return {"ok": True}
+    return {"ok": True, "mirror": public_mirror_rule(mirror_rule_by_source(source))}
+
+
+@app.put("/api/mirrors/{index}", dependencies=[Depends(require_write_token)])
+def update_mirror(index: int, body: MirrorIn):
+    existing = mirror_rule_by_index(index)
+    mirror = normalize_mirror(body.model_dump())
+    if mirror["source"] != existing["source"] and mirror_rule_by_source(mirror["source"]):
+        raise HTTPException(400, "该 source 已存在")
+    if mirror["source"] != existing["source"]:
+        delete_mirror_db(existing["source"])
+    upsert_mirror_db(mirror["source"], mirror["target"], mirror=mirror)
+    sync_config_from_db()
+    rows = mirror_rule_rows()
+    current_index = next((i for i, row in enumerate(rows) if row["source"] == mirror["source"]), index)
+    audit_log("update", "mirror", mirror["source"], mirror)
+    return {"ok": True, "mirror": public_mirror_rule(rows[current_index], current_index)}
 
 
 @app.delete("/api/mirrors/{index}", dependencies=[Depends(require_write_token)])
 def delete_mirror(index: int):
-    config = load_config()
-    mirrors = valid_mirrors(config)
-    if index < 0 or index >= len(mirrors):
-        raise HTTPException(404, "镜像不存在")
-    removed = mirrors.pop(index)
-    config["mirrors"] = mirrors
-    save_config(config)
+    removed = mirror_rule_by_index(index)
     state = load_state()
     state.pop(removed["source"], None)
     save_state(state)
     delete_mirror_db(removed["source"])
+    sync_config_from_db()
     audit_log("delete", "mirror", removed["source"], removed)
     return {"ok": True}
 
 
 @app.post("/api/mirrors/{index}/reset", dependencies=[Depends(require_write_token)])
 def reset_mirror_digest(index: int):
-    config = load_config()
-    mirrors = valid_mirrors(config)
-    if index < 0 or index >= len(mirrors):
-        raise HTTPException(404, "镜像不存在")
+    mirror = mirror_rule_by_index(index)
     state = load_state()
-    state.pop(mirrors[index]["source"], None)
+    state.pop(mirror["source"], None)
     save_state(state)
-    db_execute("UPDATE mirrors SET last_digest = NULL, updated_at = ? WHERE source = ?", (now_iso(), mirrors[index]["source"]))
-    audit_log("reset_digest", "mirror", mirrors[index]["source"], mirrors[index])
+    db_execute(
+        """
+        UPDATE mirrors
+        SET last_digest = NULL, last_source_digest = NULL, last_target_digest = NULL,
+            pending_push_digest = NULL, pending_push_target = NULL, push_status = 'idle',
+            check_failures = 0, push_failures = 0, last_error = NULL, updated_at = ?
+        WHERE source = ?
+        """,
+        (now_iso(), mirror["source"]),
+    )
+    audit_log("reset_digest", "mirror", mirror["source"], mirror)
     return {"ok": True}
 
 
 @app.post("/api/mirrors/{index}/sync", dependencies=[Depends(require_write_token)])
 def trigger_mirror_sync(index: int):
-    config = load_config()
-    mirrors = valid_mirrors(config)
-    if index < 0 or index >= len(mirrors):
-        raise HTTPException(404, "镜像不存在")
-    task = write_trigger("manual-single", source=mirrors[index]["source"])
-    audit_log("trigger_sync", "mirror", mirrors[index]["source"], {**mirrors[index], "queue_id": task["id"]})
+    mirror = mirror_rule_by_index(index)
+    task = write_trigger("manual-single", source=mirror["source"])
+    audit_log("trigger_sync", "mirror", mirror["source"], {**mirror, "queue_id": task["id"]})
     return {"ok": True, "message": "单镜像同步任务已入队，请稍后查看队列和任务历史", "queue": task}
+
+
+@app.post("/api/mirrors/{index}/check", dependencies=[Depends(require_write_token)])
+def trigger_mirror_check(index: int):
+    mirror = mirror_rule_by_index(index)
+    task = enqueue_rule_task("check", mirror, force=True)
+    audit_log("trigger_check", "mirror", mirror["source"], {"queue_id": task["id"]})
+    return {"ok": True, "message": "检查任务已入队", "queue": task}
+
+
+@app.post("/api/mirrors/{index}/push", dependencies=[Depends(require_write_token)])
+def trigger_mirror_push(index: int, body: MirrorPushIn | None = None):
+    mirror = mirror_rule_by_index(index)
+    digest = (body.digest if body else None) or mirror.get("pending_push_digest") or mirror.get("last_source_digest") or mirror.get("last_digest") or ""
+    if not digest:
+        raise HTTPException(409, "该规则还没有可推送的 digest，请先执行检查")
+    task = enqueue_rule_task("push", mirror, digest=digest, force=True)
+    db_execute(
+        """
+        UPDATE mirrors
+        SET pending_push_digest = ?, pending_push_target = ?, push_status = 'pending', updated_at = ?
+        WHERE source = ?
+        """,
+        (digest, mirror["target"], now_iso(), mirror["source"]),
+    )
+    audit_log("trigger_push", "mirror", mirror["source"], {"queue_id": task["id"], "digest": digest})
+    return {"ok": True, "message": "推送任务已入队", "queue": task}
+
+
+@app.post("/api/mirrors/{index}/pause", dependencies=[Depends(require_write_token)])
+def pause_mirror_rule(index: int):
+    mirror = mirror_rule_by_index(index)
+    db_execute("UPDATE mirrors SET enabled = 0, updated_at = ? WHERE source = ?", (now_iso(), mirror["source"]))
+    audit_log("pause", "mirror", mirror["source"], {})
+    return {"ok": True, "mirror": public_mirror_rule(mirror_rule_by_index(index), index)}
+
+
+@app.post("/api/mirrors/{index}/resume", dependencies=[Depends(require_write_token)])
+def resume_mirror_rule(index: int):
+    mirror = mirror_rule_by_index(index)
+    now = now_iso()
+    db_execute("UPDATE mirrors SET enabled = 1, next_check_at = COALESCE(next_check_at, ?), updated_at = ? WHERE source = ?", (now, now, mirror["source"]))
+    audit_log("resume", "mirror", mirror["source"], {})
+    return {"ok": True, "mirror": public_mirror_rule(mirror_rule_by_index(index), index)}
+
+
+@app.post("/api/mirrors/{index}/skip-pending-push", dependencies=[Depends(require_write_token)])
+def skip_pending_mirror_push(index: int):
+    mirror = mirror_rule_by_index(index)
+    digest = mirror.get("pending_push_digest") or ""
+    db_execute(
+        """
+        UPDATE mirrors
+        SET pending_push_digest = NULL, pending_push_target = NULL, push_status = 'skipped', last_error = NULL, updated_at = ?
+        WHERE source = ?
+        """,
+        (now_iso(), mirror["source"]),
+    )
+    record_mirror_event(mirror["source"], "push", "skipped", new_digest=digest, message="pending push skipped by panel")
+    audit_log("skip_pending_push", "mirror", mirror["source"], {"digest": digest})
+    return {"ok": True, "mirror": public_mirror_rule(mirror_rule_by_index(index), index)}
+
+
+@app.get("/api/mirror-events")
+def list_mirror_events(mirror_id: str = "", limit: int = 100):
+    bounded_limit = max(1, min(limit, 500))
+    if mirror_id:
+        rows = db_rows(
+            """
+            SELECT id, mirror_id, type, status, old_digest, new_digest, message, detail_json, created_at
+            FROM mirror_events
+            WHERE mirror_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (mirror_id, bounded_limit),
+        )
+    else:
+        rows = db_rows(
+            """
+            SELECT id, mirror_id, type, status, old_digest, new_digest, message, detail_json, created_at
+            FROM mirror_events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        )
+    for row in rows:
+        try:
+            row["detail"] = json.loads(row.pop("detail_json") or "{}")
+        except json.JSONDecodeError:
+            row["detail"] = {}
+    return rows
 
 
 @app.get("/api/mirrors/{index}/artifact")
 def download_mirror_artifact(index: int):
-    config = load_config()
-    mirrors = valid_mirrors(config)
-    if index < 0 or index >= len(mirrors):
-        raise HTTPException(404, "镜像不存在")
-    archive_path, filename = build_local_artifact_archive(mirrors[index]["target"])
-    audit_log("download", "artifact", mirrors[index]["target"], {"source": mirrors[index]["source"], "format": "registry-storage-artifact-v1"})
+    mirror = mirror_rule_by_index(index)
+    archive_path, filename = build_local_artifact_archive(mirror["target"])
+    audit_log("download", "artifact", mirror["target"], {"source": mirror["source"], "format": "registry-storage-artifact-v1"})
     return FileResponse(
         archive_path,
         media_type="application/x-tar",
