@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-basetemp/
+.venv/
+node_modules/
+panel/node_modules/
+
+# Local development docs
+mirror-registry-dev-doc*.md
+docs/
+.env
+
+data/*
+!data/.gitkeep
+!data/registry/
+data/registry/*
+!data/registry/.gitkeep
+.runtime/
+.env.local
